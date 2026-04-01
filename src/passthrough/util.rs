@@ -148,9 +148,7 @@ pub(crate) fn get_path_by_fd(
 ) -> Result<CString, FdPathError> {
     let mut buf = vec![0u8; libc::PATH_MAX as usize];
 
-    let ret = unsafe {
-        libc::fcntl(fd.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr())
-    };
+    let ret = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) };
 
     if ret == -1 {
         return Err(FdPathError::ReadLink(io::Error::last_os_error()));
@@ -225,4 +223,70 @@ pub fn relative_path<'a>(path: &'a CStr, prefix: &CStr) -> io::Result<&'a CStr> 
     // Must succeed: Was a `CStr` before, converted to `&[u8]` via `to_bytes_with_nul()`, so must
     // still contain exactly one NUL byte at the end of the slice
     Ok(CStr::from_bytes_with_nul(relative_path).unwrap())
+}
+
+/// Translate Linux open flag numeric values to macOS equivalents.
+///
+/// The FUSE protocol sends Linux open flag values. On macOS, many flags have
+/// different numeric values (e.g., Linux O_DIRECTORY=0o200000 vs macOS
+/// O_DIRECTORY=0x100000). This function maps each Linux flag bit to its macOS
+/// counterpart.
+#[cfg(target_os = "macos")]
+pub fn translate_linux_open_flags(linux_flags: i32) -> i32 {
+    let mut mac_flags: i32 = 0;
+
+    // Access mode (O_RDONLY=0, O_WRONLY=1, O_RDWR=2)
+    let accmode = linux_flags & 0o3;
+    mac_flags |= match accmode {
+        0 => libc::O_RDONLY,
+        1 => libc::O_WRONLY,
+        2 => libc::O_RDWR,
+        _ => libc::O_RDONLY,
+    };
+
+    // Linux flag constants → macOS libc equivalents
+    if linux_flags & 0o100 != 0 {
+        mac_flags |= libc::O_CREAT;
+    }
+    if linux_flags & 0o200 != 0 {
+        mac_flags |= libc::O_EXCL;
+    }
+    if linux_flags & 0o400 != 0 {
+        mac_flags |= libc::O_NOCTTY;
+    }
+    if linux_flags & 0o1000 != 0 {
+        mac_flags |= libc::O_TRUNC;
+    }
+    if linux_flags & 0o2000 != 0 {
+        mac_flags |= libc::O_APPEND;
+    }
+    if linux_flags & 0o4000 != 0 {
+        mac_flags |= libc::O_NONBLOCK;
+    }
+    if linux_flags & 0o200000 != 0 {
+        mac_flags |= libc::O_DIRECTORY;
+    }
+    if linux_flags & 0o400000 != 0 {
+        mac_flags |= libc::O_NOFOLLOW;
+    }
+    if linux_flags & 0o2000000 != 0 {
+        mac_flags |= libc::O_CLOEXEC;
+    }
+    if linux_flags & 0o4010000 != 0 {
+        mac_flags |= libc::O_SYNC;
+    }
+    if linux_flags & 0o10000 != 0 {
+        mac_flags |= libc::O_DSYNC;
+    }
+    // O_DIRECT (0o40000), O_NOATIME (0o1000000), O_LARGEFILE: drop silently
+    // (no macOS equivalents)
+
+    mac_flags
+}
+
+/// On Linux, flags are already native — pass through unchanged.
+#[cfg(target_os = "linux")]
+#[inline]
+pub fn translate_linux_open_flags(linux_flags: i32) -> i32 {
+    linux_flags
 }

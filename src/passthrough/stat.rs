@@ -153,17 +153,22 @@ pub fn statx(dir: &impl AsRawFd, path: Option<&CStr>) -> io::Result<StatExt> {
 /// synthesize a mount ID from `st_dev`.
 #[cfg(target_os = "macos")]
 pub fn statx(dir: &impl AsRawFd, path: Option<&CStr>) -> io::Result<StatExt> {
-    let path = path.unwrap_or_else(|| unsafe { CStr::from_bytes_with_nul_unchecked(EMPTY_CSTR) });
-
     let mut stat_buf = MaybeUninit::<libc::stat64>::zeroed();
 
-    let res = unsafe {
-        libc::fstatat64(
-            dir.as_raw_fd(),
-            path.as_ptr(),
-            stat_buf.as_mut_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
+    // macOS has no AT_EMPTY_PATH. When path is None (i.e. stat the fd itself),
+    // use fstat() directly instead of fstatat() with an empty path which would
+    // return ENOENT.
+    let res = if let Some(p) = path {
+        unsafe {
+            libc::fstatat64(
+                dir.as_raw_fd(),
+                p.as_ptr(),
+                stat_buf.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        }
+    } else {
+        unsafe { libc::fstat(dir.as_raw_fd(), stat_buf.as_mut_ptr() as *mut libc::stat) }
     };
 
     if res == 0 {

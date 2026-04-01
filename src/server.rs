@@ -1548,10 +1548,60 @@ fn strerror(error: i32) -> String {
     String::from_utf8(err_desc.to_vec()).unwrap_or_else(|_| "".to_owned())
 }
 
+/// Translate macOS errno values to their Linux equivalents for the FUSE protocol.
+///
+/// The FUSE client in the guest expects Linux errno values. macOS uses different
+/// numeric values for many errno constants. On Linux this is a no-op.
+#[cfg(target_os = "macos")]
+fn errno_to_linux(errno: i32) -> i32 {
+    match errno {
+        35 => 11,   // EAGAIN / EWOULDBLOCK
+        36 => 115,  // EINPROGRESS
+        37 => 114,  // EALREADY
+        38 => 88,   // ENOTSOCK
+        39 => 89,   // EDESTADDRREQ
+        40 => 90,   // EMSGSIZE
+        41 => 91,   // EPROTOTYPE
+        42 => 92,   // ENOPROTOOPT
+        43 => 93,   // EPROTONOSUPPORT
+        44 => 94,   // ESOCKTYPENOSUPPORT
+        45 => 95,   // EOPNOTSUPP / ENOTSUP
+        46 => 96,   // EPFNOSUPPORT
+        47 => 97,   // EAFNOSUPPORT
+        48 => 98,   // EADDRINUSE
+        49 => 99,   // EADDRNOTAVAIL
+        50 => 100,  // ENETDOWN
+        51 => 101,  // ENETUNREACH
+        52 => 102,  // ENETRESET
+        53 => 103,  // ECONNABORTED
+        54 => 104,  // ECONNRESET
+        55 => 105,  // ENOBUFS
+        56 => 106,  // EISCONN
+        57 => 107,  // ENOTCONN
+        60 => 110,  // ETIMEDOUT
+        61 => 111,  // ECONNREFUSED
+        62 => 40,   // ELOOP
+        63 => 36,   // ENAMETOOLONG
+        65 => 113,  // EHOSTUNREACH
+        66 => 116,  // EHOSTDOWN (Linux: ESTALE=116 — closest)
+        67 => 39,   // ENOTEMPTY
+        78 => 38,   // ENOSYS
+        84 => 75,   // EOVERFLOW
+        100 => 71,  // EPROTO
+        _ => errno, // pass through values that are the same or unmapped
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[inline]
+fn errno_to_linux(errno: i32) -> i32 {
+    errno
+}
+
 fn reply_error(e: io::Error, unique: u64, mut w: Writer) -> Result<usize> {
     let header = OutHeader {
         len: size_of::<OutHeader>() as u32,
-        error: -e.raw_os_error().unwrap_or(libc::EIO),
+        error: -errno_to_linux(e.raw_os_error().unwrap_or(libc::EIO)),
         unique,
     };
 
