@@ -113,10 +113,14 @@ impl Drop for UnixCredentialsGuard {
     }
 }
 
+// ── Linux: capability-based scoped cap drop ─────────────────────────────────
+
+#[cfg(target_os = "linux")]
 pub struct ScopedCaps {
     cap: capng::Capability,
 }
 
+#[cfg(target_os = "linux")]
 impl ScopedCaps {
     fn new(cap_name: &str) -> io::Result<Option<Self>> {
         use capng::{Action, CUpdate, Set, Type};
@@ -148,6 +152,7 @@ impl ScopedCaps {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for ScopedCaps {
     fn drop(&mut self) {
         use capng::{Action, CUpdate, Set, Type};
@@ -170,6 +175,19 @@ impl Drop for ScopedCaps {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub fn drop_effective_cap(cap_name: &str) -> io::Result<Option<ScopedCaps>> {
     ScopedCaps::new(cap_name)
+}
+
+// ── macOS: no-op capability stubs ───────────────────────────────────────────
+
+/// No-op scoped capability on macOS.
+#[cfg(target_os = "macos")]
+pub struct ScopedCaps;
+
+/// No-op: macOS has no POSIX capabilities.
+#[cfg(target_os = "macos")]
+pub fn drop_effective_cap(_cap_name: &str) -> io::Result<Option<ScopedCaps>> {
+    Ok(None)
 }

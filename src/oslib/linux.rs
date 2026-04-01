@@ -1,22 +1,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
+use super::check_retval;
+use super::{PipeReader, PipeWriter};
 use crate::soft_idmap::{HostGid, HostUid, Id};
 use bitflags::bitflags;
 use std::ffi::{CStr, CString};
 use std::fs::File;
-use std::io::{self, Error, Result};
+use std::io::{self, Result};
 use std::os::unix::io::{AsRawFd, BorrowedFd, RawFd};
 use std::os::unix::prelude::FromRawFd;
-
-// A helper function that check the return value of a C function call
-// and wraps it in a `Result` type, returning the `errno` code as `Err`.
-fn check_retval<T: From<i8> + PartialEq>(t: T) -> Result<T> {
-    if t == T::from(-1_i8) {
-        Err(Error::last_os_error())
-    } else {
-        Ok(t)
-    }
-}
 
 /// Simple object to collect basic facts about the OS,
 /// such as available syscalls.
@@ -101,92 +93,6 @@ pub fn umount2(target: &str, flags: i32) -> Result<()> {
     // Safety: `target` is a valid C string pointer
     check_retval(unsafe { libc::umount2(target, flags) })?;
     Ok(())
-}
-
-/// Safe wrapper for `fchdir(2)`
-///
-/// # Errors
-///
-/// Will return `Err(errno)` if `fchdir(2)` fails.
-/// Each filesystem type may have its own special errors, see `fchdir(2)` for details.
-pub fn fchdir(fd: RawFd) -> Result<()> {
-    check_retval(unsafe { libc::fchdir(fd) })?;
-    Ok(())
-}
-
-/// Safe wrapper for `fchmod(2)`
-///
-/// # Errors
-///
-/// Will return `Err(errno)` if `fchmod(2)` fails.
-/// Each filesystem type may have its own special errors, see `fchmod(2)` for details.
-pub fn fchmod(fd: RawFd, mode: libc::mode_t) -> Result<()> {
-    check_retval(unsafe { libc::fchmod(fd, mode) })?;
-    Ok(())
-}
-
-/// Safe wrapper for `fchmodat(2)`
-///
-/// # Errors
-///
-/// Will return `Err(errno)` if `fchmodat(2)` fails.
-/// Each filesystem type may have its own special errors, see `fchmodat(2)` for details.
-pub fn fchmodat(dirfd: RawFd, pathname: String, mode: libc::mode_t, flags: i32) -> Result<()> {
-    let pathname =
-        CString::new(pathname).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let pathname = pathname.as_ptr();
-
-    check_retval(unsafe { libc::fchmodat(dirfd, pathname, mode, flags) })?;
-    Ok(())
-}
-
-/// Safe wrapper for `umask(2)`
-pub fn umask(mask: u32) -> u32 {
-    // SAFETY: this call doesn't modify any memory and there is no need
-    // to check the return value because this system call always succeeds.
-    unsafe { libc::umask(mask) }
-}
-
-/// An RAII implementation of a scoped file mode creation mask (umask), it set the
-/// new umask. When this structure is dropped (falls out of scope), it set the previous
-/// value of the mask.
-pub struct ScopedUmask {
-    umask: libc::mode_t,
-}
-
-impl ScopedUmask {
-    pub fn new(new_umask: u32) -> Self {
-        Self {
-            umask: umask(new_umask),
-        }
-    }
-}
-
-impl Drop for ScopedUmask {
-    fn drop(&mut self) {
-        umask(self.umask);
-    }
-}
-
-/// Safe wrapper around `openat(2)`.
-///
-/// # Errors
-///
-/// Will return `Err(errno)` if `openat(2)` fails,
-/// see `openat(2)` for details.
-pub fn openat(dir: &impl AsRawFd, pathname: &CStr, flags: i32, mode: Option<u32>) -> Result<RawFd> {
-    let mode = u64::from(mode.unwrap_or(0));
-
-    // SAFETY: `pathname` points to a valid NUL-terminated string.
-    // However, the caller must ensure that `dir` can provide a valid file descriptor.
-    check_retval(unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            pathname.as_ptr(),
-            flags as libc::c_int,
-            mode,
-        )
-    })
 }
 
 /// Safe wrapper around `open_tree(2)`.
@@ -474,15 +380,6 @@ bitflags! {
 
 /// Safe wrapper for `pwritev2(2)`
 ///
-/// This system call is similar `pwritev(2)`, but add a new argument,
-/// flags, which modifies the behavior on a per-call basis.
-/// Unlike `pwritev(2)`, if the offset argument is -1, then the current file offset
-/// is used and updated.
-///
-/// # Errors
-///
-/// Will return `Err(errno)` if `pwritev2(2)` fails, see `pwritev2(2)` for details.
-///
 /// # Safety
 ///
 /// The caller must ensure that each iovec element is valid (i.e., it has a valid `iov_base`
@@ -494,9 +391,6 @@ pub unsafe fn writev_at(
     flags: Option<WritevFlags>,
 ) -> Result<usize> {
     let flags = flags.unwrap_or(WritevFlags::empty());
-    // SAFETY: `fd` is a valid filed descriptor, `iov` is a valid pointer
-    // to the iovec slice `ìovecs` of `iovcnt` elements. However, the caller
-    // must ensure that each iovec element has a valid `iov_base` pointer and `iov_len`.
     let bytes_written = check_retval(unsafe {
         libc::pwritev2(
             fd.as_raw_fd(),
@@ -511,15 +405,6 @@ pub unsafe fn writev_at(
 
 /// Safe wrapper for `preadv2(2)`
 ///
-/// This system call is similar `preadv(2)`, but add a new argument,
-/// flags, which modifies the behavior on a per-call basis.
-/// Unlike `preadv(2)`, if the offset argument is -1, then the current file offset
-/// is used and updated.
-///
-/// # Errors
-///
-/// Will return `Err(errno)` if `preadv2(2)` fails, see `preadv2(2)` for details.
-///
 /// # Safety
 ///
 /// The caller must ensure that each iovec element is valid (i.e., it has a valid `iov_base`
@@ -531,9 +416,6 @@ pub unsafe fn readv_at(
     flags: Option<ReadvFlags>,
 ) -> Result<usize> {
     let flags = flags.unwrap_or(ReadvFlags::empty());
-    // SAFETY: `fd` is a valid filed descriptor, `iov` is a valid pointer
-    // to the iovec slice `ìovecs` of `iovcnt` elements. However, the caller
-    // must ensure that each iovec element has a valid `iov_base` pointer and `iov_len`.
     let bytes_read = check_retval(unsafe {
         libc::preadv2(
             fd.as_raw_fd(),
@@ -544,26 +426,6 @@ pub unsafe fn readv_at(
         )
     })?;
     Ok(bytes_read as usize)
-}
-
-pub struct PipeReader(File);
-
-impl io::Read for PipeReader {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.0.read(buf)
-    }
-}
-
-pub struct PipeWriter(File);
-
-impl io::Write for PipeWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.write(buf)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.0.flush()
-    }
 }
 
 pub fn pipe() -> io::Result<(PipeReader, PipeWriter)> {

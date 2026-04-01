@@ -2,40 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use super::{Error, SeccompAction};
 use libseccomp_sys::{
     seccomp_init, seccomp_load, seccomp_release, seccomp_rule_add, SCMP_ACT_ALLOW,
     SCMP_ACT_KILL_PROCESS, SCMP_ACT_LOG, SCMP_ACT_TRAP,
 };
 use std::convert::TryInto;
-use std::{error, fmt};
-
-#[derive(Debug)]
-pub enum Error {
-    /// Error allowing a syscall
-    AllowSeccompSyscall(i32),
-
-    /// Cannot load seccomp filter
-    LoadSeccompFilter,
-
-    /// Cannot initialize seccomp context
-    InitSeccompContext,
-}
-
-impl error::Error for Error {}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "virtiofsd_seccomp_error: {self:?}")
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
-pub enum SeccompAction {
-    Allow,
-    Kill,
-    Log,
-    Trap,
-}
 
 impl From<SeccompAction> for u32 {
     fn from(action: SeccompAction) -> u32 {

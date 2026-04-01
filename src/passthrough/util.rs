@@ -96,7 +96,8 @@ pub(crate) enum FdPathError {
     Deleted(String),
 }
 
-/// Looks up an FD's path through /proc/self/fd
+/// Looks up an FD's path through /proc/self/fd (Linux) or fcntl(F_GETPATH) (macOS)
+#[cfg(target_os = "linux")]
 pub(crate) fn get_path_by_fd(
     fd: &impl AsRawFd,
     proc_self_fd: &impl AsRawFd,
@@ -136,6 +137,33 @@ pub(crate) fn get_path_by_fd(
     }
 
     Ok(link_target_cstring)
+}
+
+/// Looks up an FD's path using `fcntl(F_GETPATH)` on macOS.
+/// The `proc_self_fd` argument is accepted for API compatibility but ignored.
+#[cfg(target_os = "macos")]
+pub(crate) fn get_path_by_fd(
+    fd: &impl AsRawFd,
+    _proc_self_fd: &impl AsRawFd,
+) -> Result<CString, FdPathError> {
+    let mut buf = vec![0u8; libc::PATH_MAX as usize];
+
+    let ret = unsafe {
+        libc::fcntl(fd.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr())
+    };
+
+    if ret == -1 {
+        return Err(FdPathError::ReadLink(io::Error::last_os_error()));
+    }
+
+    // Find the NUL terminator
+    let nul_pos = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    buf.truncate(nul_pos + 1);
+
+    let path_cstring = CString::from_vec_with_nul(buf)
+        .map_err(|err| FdPathError::InvalidCString(other_io_error(err)))?;
+
+    Ok(path_cstring)
 }
 
 impl From<FdPathError> for io::Error {

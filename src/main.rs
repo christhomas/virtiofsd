@@ -4,6 +4,7 @@
 
 use log::*;
 use passthrough::xattrmap::XattrMap;
+#[cfg(target_os = "linux")]
 use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::ffi::CString;
@@ -557,6 +558,7 @@ fn set_signal_handlers() {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn parse_modcaps(
     default_caps: Vec<&str>,
     modcaps: Option<String>,
@@ -597,6 +599,7 @@ fn parse_modcaps(
     (required_caps, disabled_caps)
 }
 
+#[cfg(target_os = "linux")]
 fn drop_capabilities(inode_file_handles: InodeFileHandlesMode, modcaps: Option<String>) {
     let default_caps = vec![
         "CHOWN",
@@ -634,6 +637,12 @@ fn drop_capabilities(inode_file_handles: InodeFileHandlesMode, modcaps: Option<S
         error!("can't apply the child capabilities: {e}");
         process::exit(1);
     }
+}
+
+/// No-op capability drop on macOS.
+#[cfg(target_os = "macos")]
+fn drop_capabilities(_inode_file_handles: InodeFileHandlesMode, _modcaps: Option<String>) {
+    // TODO(macos): macOS has no POSIX capabilities system.
 }
 
 fn main() {
