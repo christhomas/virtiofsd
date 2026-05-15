@@ -15,6 +15,7 @@ pub mod fuse;
 pub mod idmap;
 pub mod limits;
 pub mod macros;
+pub mod notify_invalidate;
 pub mod oslib;
 pub mod passthrough;
 pub mod read_dir;

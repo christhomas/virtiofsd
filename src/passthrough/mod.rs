@@ -6,6 +6,7 @@
 use crate::libc_compat as libc;
 
 pub mod credentials;
+pub mod dentry_index;
 pub mod device_state;
 pub mod file_handle;
 mod guest_fd_limit;
@@ -510,6 +511,12 @@ pub struct PassthroughFs {
 
     /// Map to translate between host and guest GIDs.
     gid_map: IdMap<GuestGid, HostGid>,
+
+    /// Reverse `(parent, name) -> inode` index, populated only when the
+    /// push-based cache invalidation feature is enabled. Outside of that
+    /// feature the field stays `None` and the FUSE-op hot path performs a
+    /// single `Option::is_some()` check before the cheap RwLock write.
+    dentry_index: Option<Arc<dentry_index::DentryIndex>>,
 }
 
 impl PassthroughFs {
@@ -597,6 +604,7 @@ impl PassthroughFs {
             cfg,
             uid_map,
             gid_map,
+            dentry_index: None,
         };
 
         // Check to see if the client remapped "security.capability", if so,
@@ -648,6 +656,62 @@ impl PassthroughFs {
 
     pub fn keep_fds(&self) -> Vec<RawFd> {
         vec![self.proc_self_fd.as_raw_fd()]
+    }
+
+    /// Enable maintenance of the dentry index. The host-side watcher uses it
+    /// to translate filesystem events into FUSE invalidation messages. Must be
+    /// called before any FUSE op is dispatched (i.e. during daemon setup).
+    pub fn enable_dentry_index(&mut self) -> Arc<dentry_index::DentryIndex> {
+        let idx = Arc::new(dentry_index::DentryIndex::new());
+        // Seed with the root: by convention the root inode is fuse::ROOT_ID.
+        // The root has no parent so it is not inserted as a child; it is the
+        // base case for path resolution.
+        self.dentry_index = Some(Arc::clone(&idx));
+        idx
+    }
+
+    /// Notify the dentry index of a successful name → inode resolution. No-op
+    /// when push invalidation is disabled.
+    #[inline(always)]
+    fn dentry_index_insert(&self, parent: Inode, name: &CStr, child: Inode) {
+        if let Some(idx) = self.dentry_index.as_ref() {
+            idx.insert(parent, name.to_bytes(), child);
+        }
+    }
+
+    /// Notify the dentry index that a name was unlinked.
+    #[inline(always)]
+    fn dentry_index_remove(&self, parent: Inode, name: &CStr) {
+        if let Some(idx) = self.dentry_index.as_ref() {
+            idx.remove(parent, name.to_bytes());
+        }
+    }
+
+    /// Notify the dentry index of a rename.
+    #[inline(always)]
+    fn dentry_index_rename(
+        &self,
+        old_parent: Inode,
+        old_name: &CStr,
+        new_parent: Inode,
+        new_name: &CStr,
+    ) {
+        if let Some(idx) = self.dentry_index.as_ref() {
+            idx.rename(
+                old_parent,
+                old_name.to_bytes(),
+                new_parent,
+                new_name.to_bytes(),
+            );
+        }
+    }
+
+    /// Notify the dentry index that an inode is fully forgotten by the guest.
+    #[inline(always)]
+    fn dentry_index_forget(&self, inode: Inode) {
+        if let Some(idx) = self.dentry_index.as_ref() {
+            idx.forget_inode(inode);
+        }
     }
 
     fn open_relative_to(
@@ -976,11 +1040,13 @@ impl PassthroughFs {
             |uid| self.map_host_uid(uid),
             |gid| self.map_host_gid(gid),
         )?;
+        // By leaking, we transfer ownership of this refcount to the guest.  That is safe,
+        // because the guest is expected to explicitly release its reference and decrement the
+        // refcount via `FORGET` later.
+        let inode_id = unsafe { inode.leak() };
+        self.dentry_index_insert(parent, name, inode_id);
         Ok(Entry {
-            // By leaking, we transfer ownership of this refcount to the guest.  That is safe,
-            // because the guest is expected to explicitly release its reference and decrement the
-            // refcount via `FORGET` later.
-            inode: unsafe { inode.leak() },
+            inode: inode_id,
             generation: 0,
             attr,
             attr_timeout: self.cfg.attr_timeout,
@@ -1096,6 +1162,7 @@ impl PassthroughFs {
             self.after_invalidating_path(invalidated_inode, "Unlinked");
         }
         if res == 0 {
+            self.dentry_index_remove(parent, name);
             Ok(())
         } else {
             Err(io::Error::last_os_error())
@@ -1675,11 +1742,24 @@ impl FileSystem for PassthroughFs {
     }
 
     fn forget(&self, _ctx: Context, inode: Inode, count: u64) {
-        self.inodes.forget_one(inode, count)
+        self.inodes.forget_one(inode, count);
+        if self.dentry_index.is_some() && self.inodes.get(inode).is_none() {
+            self.dentry_index_forget(inode);
+        }
     }
 
     fn batch_forget(&self, _ctx: Context, requests: Vec<(Inode, u64)>) {
-        self.inodes.forget_many(requests)
+        let inodes: Vec<Inode> = if self.dentry_index.is_some() {
+            requests.iter().map(|(i, _)| *i).collect()
+        } else {
+            Vec::new()
+        };
+        self.inodes.forget_many(requests);
+        for inode in inodes {
+            if self.inodes.get(inode).is_none() {
+                self.dentry_index_forget(inode);
+            }
+        }
     }
 
     fn opendir(
@@ -2202,6 +2282,8 @@ impl FileSystem for PassthroughFs {
                 the migration destination may be unable to find it: {err}",
             );
         }
+
+        self.dentry_index_rename(olddir, oldname, newdir, newname);
 
         Ok(())
     }

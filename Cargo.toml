@@ -40,6 +40,8 @@ vm-memory = { version = "=0.17.1", features = ["backend-mmap", "backend-atomic"]
 virtio-queue = "0.17.0"
 vmm-sys-util = "0.15.0"
 syslog = "6.1"
+notify = "6.1"
+crossbeam-channel = "0.5"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 capng = "0.2.2"

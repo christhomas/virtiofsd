@@ -22,6 +22,8 @@ use vhost::vhost_user::Listener;
 use vhost_user_backend::Error::HandleRequest;
 use vhost_user_backend::VhostUserDaemon;
 use virtiofsd::filesystem::{FileSystem, SerializableFileSystem};
+use virtiofsd::notify_invalidate;
+use virtiofsd::passthrough::dentry_index::DentryIndex;
 use virtiofsd::passthrough::read_only::PassthroughFsRo;
 use virtiofsd::passthrough::{
     self, CachePolicy, InodeFileHandlesMode, MigrationMode, MigrationOnError, PassthroughFs,
@@ -188,6 +190,21 @@ struct Opt {
     /// Do not tell the guest which directories are mount points
     #[arg(long, overrides_with("announce_submounts"))]
     no_announce_submounts: bool,
+
+    /// Push cache invalidations to the guest when the host filesystem changes.
+    ///
+    /// The daemon watches the shared directory tree (via inotify on Linux,
+    /// FSEvents on macOS) and sends FUSE_NOTIFY_INVAL_INODE / INVAL_ENTRY
+    /// messages when files change, so the guest sees host edits within
+    /// ~100 ms instead of waiting for the cache TTL to expire.
+    ///
+    /// This is best-effort: under heavy churn the host watcher may drop
+    /// events, in which case the daemon falls back to invalidating every
+    /// cached inode. The TTL-based revalidation in `--cache=auto` stays as
+    /// the backstop. Off by default — requires the guest kernel to negotiate
+    /// VIRTIO_FS_F_NOTIFICATION (Linux 6.6+).
+    #[arg(long)]
+    notify_invalidate: bool,
 
     /// When to use file handles to reference inodes instead of O_PATH file descriptors (never,
     /// prefer, mandatory)
@@ -871,19 +888,33 @@ fn main() {
         }
     }
 
-    if opt.readonly {
-        let fs = PassthroughFsRo::new(fs_cfg).unwrap_or_else(|e| {
-            error!("Failed to create internal filesystem representation: {e}");
-            process::exit(1);
-        });
-        run_generic_fs(fs, listener, thread_pool_size, opt.tag);
+    let notify_pipeline = if opt.notify_invalidate {
+        Some(NotifyInvalidatePipeline {
+            shared_dir: std::path::PathBuf::from(&shared_dir),
+        })
     } else {
-        let fs = PassthroughFs::new(fs_cfg).unwrap_or_else(|e| {
+        None
+    };
+
+    if opt.readonly {
+        let mut fs = PassthroughFsRo::new(fs_cfg).unwrap_or_else(|e| {
             error!("Failed to create internal filesystem representation: {e}");
             process::exit(1);
         });
-        run_generic_fs(fs, listener, thread_pool_size, opt.tag);
+        let dentry_index = notify_pipeline.as_ref().map(|_| fs.enable_dentry_index());
+        run_generic_fs(fs, listener, thread_pool_size, opt.tag, notify_pipeline, dentry_index);
+    } else {
+        let mut fs = PassthroughFs::new(fs_cfg).unwrap_or_else(|e| {
+            error!("Failed to create internal filesystem representation: {e}");
+            process::exit(1);
+        });
+        let dentry_index = notify_pipeline.as_ref().map(|_| fs.enable_dentry_index());
+        run_generic_fs(fs, listener, thread_pool_size, opt.tag, notify_pipeline, dentry_index);
     }
+}
+
+struct NotifyInvalidatePipeline {
+    shared_dir: std::path::PathBuf,
 }
 
 // Use a generic function for the main loop so we don't need to use Box<dyn FileSystem>
@@ -892,17 +923,47 @@ fn run_generic_fs<F: FileSystem + SerializableFileSystem + Send + Sync + 'static
     mut listener: Listener,
     thread_pool_size: usize,
     tag: Option<String>,
+    notify_pipeline: Option<NotifyInvalidatePipeline>,
+    dentry_index: Option<Arc<DentryIndex>>,
 ) {
     let fs_backend = Arc::new(
         VhostUserFsBackendBuilder::default()
             .set_thread_pool_size(thread_pool_size)
             .set_tag(tag)
+            .set_notify_invalidate(notify_pipeline.is_some())
             .build(fs)
             .unwrap_or_else(|error| {
                 error!("Error creating vhost-user backend: {error}");
                 process::exit(1)
             }),
     );
+
+    if let (Some(pipeline), Some(idx)) = (notify_pipeline.as_ref(), dentry_index.as_ref()) {
+        let notifier = fs_backend.notifier();
+        let root_inode = virtiofsd::fuse::ROOT_ID;
+        match notify_invalidate::spawn_pipeline(
+            pipeline.shared_dir.clone(),
+            root_inode,
+            Arc::clone(idx),
+            notifier,
+        ) {
+            Ok(handle) => {
+                // Detach: the watcher runs for the lifetime of the daemon.
+                // We intentionally leak the JoinHandle — there is no
+                // graceful shutdown protocol for the watcher today; a
+                // daemon exit drops the OS watcher fd and the thread
+                // observes the channel close.
+                std::mem::forget(handle);
+                info!(
+                    "notify-invalidate: pipeline started against {}",
+                    pipeline.shared_dir.display()
+                );
+            }
+            Err(err) => {
+                error!("notify-invalidate: failed to start pipeline: {err}");
+            }
+        }
+    }
 
     let mut daemon = VhostUserDaemon::new(
         String::from("virtiofsd-backend"),

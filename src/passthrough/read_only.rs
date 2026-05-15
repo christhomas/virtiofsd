@@ -42,6 +42,15 @@ impl PassthroughFsRo {
         Ok(PassthroughFsRo(inner))
     }
 
+    /// Forward to the inner filesystem so callers can opt-in to push-based
+    /// cache invalidation even on read-only mounts (the host can still
+    /// modify the underlying tree out-of-band).
+    pub fn enable_dentry_index(
+        &mut self,
+    ) -> std::sync::Arc<crate::passthrough::dentry_index::DentryIndex> {
+        self.0.enable_dentry_index()
+    }
+
     /// Internal: Run an `open()`-like function without allowing modifications or write access.
     ///
     /// That means:
