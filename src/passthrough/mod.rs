@@ -721,6 +721,24 @@ impl PassthroughFs {
         flags: i32,
         mode: Option<u32>,
     ) -> io::Result<RawFd> {
+        // Linux uses `O_PATH | O_NOFOLLOW` to get an inode reference that works
+        // for symlinks (the fd refers to the symlink itself, not its target).
+        // macOS has no `O_PATH`; the substitute `O_RDONLY | O_NOFOLLOW` fails
+        // with `ELOOP` on every symlink — `O_NOFOLLOW` plus a path that names a
+        // symlink is `ELOOP` on Darwin, regardless of access mode. That breaks
+        // every FUSE `LOOKUP` of a symlink: stat'ing dangling links, listing
+        // directories that contain symlinks, and `symlink(2)` calls whose
+        // parent path traverses any symlink all surface as `ELOOP` in the
+        // guest.
+        //
+        // Darwin's `O_SYMLINK` is the platform's equivalent of Linux's
+        // `O_PATH | O_NOFOLLOW`: open the symlink itself if the trailing
+        // component is one, otherwise open normally. It is a no-op on regular
+        // files and directories. Substitute it for `O_NOFOLLOW` on macOS so
+        // lookups of symlinks succeed.
+        #[cfg(target_os = "macos")]
+        let flags = (flags & !libc::O_NOFOLLOW) | libc::O_SYMLINK | libc::O_CLOEXEC;
+        #[cfg(target_os = "linux")]
         let flags = libc::O_NOFOLLOW | libc::O_CLOEXEC | flags;
 
         if self.os_facts.has_openat2 {
@@ -2420,18 +2438,46 @@ impl FileSystem for PassthroughFs {
 
         let mut buf = vec![0; libc::PATH_MAX as usize];
 
-        // Safe because this is a constant value and a valid C string.
-        let empty = unsafe { CStr::from_bytes_with_nul_unchecked(EMPTY_CSTR) };
+        #[cfg(target_os = "linux")]
+        let res = {
+            // Safe because this is a constant value and a valid C string.
+            let empty = unsafe { CStr::from_bytes_with_nul_unchecked(EMPTY_CSTR) };
 
-        // Safe because this will only modify the contents of `buf` and we check the return value.
-        let res = unsafe {
-            libc::readlinkat(
-                inode_file.as_raw_fd(),
-                empty.as_ptr(),
-                buf.as_mut_ptr() as *mut libc::c_char,
-                buf.len(),
-            )
+            // Safe because this will only modify the contents of `buf` and we check the return value.
+            unsafe {
+                libc::readlinkat(
+                    inode_file.as_raw_fd(),
+                    empty.as_ptr(),
+                    buf.as_mut_ptr() as *mut libc::c_char,
+                    buf.len(),
+                )
+            }
         };
+
+        // macOS has no `AT_EMPTY_PATH`, so `readlinkat(fd, "", ...)` returns
+        // `ENOENT`. The symlink fd was opened with `O_SYMLINK` (see
+        // `open_relative_to`), but there is no way to readlink an fd
+        // directly. Resolve the symlink's path via `F_GETPATH` and readlink
+        // that. This has a TOCTOU window — a racing rename can change the
+        // symlink under us — but macOS exposes no fd→target API.
+        #[cfg(target_os = "macos")]
+        let res = {
+            let mut path_buf = vec![0u8; libc::PATH_MAX as usize];
+            let r = unsafe {
+                libc::fcntl(inode_file.as_raw_fd(), libc::F_GETPATH, path_buf.as_mut_ptr())
+            };
+            if r < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            unsafe {
+                libc::readlink(
+                    path_buf.as_ptr() as *const libc::c_char,
+                    buf.as_mut_ptr() as *mut libc::c_char,
+                    buf.len(),
+                )
+            }
+        };
+
         if res < 0 {
             return Err(io::Error::last_os_error());
         }

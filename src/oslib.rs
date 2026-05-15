@@ -384,9 +384,14 @@ pub fn do_open_relative_to(
     } as RawFd)
 }
 
-/// macOS: openat2() is not available. Fall back to openat() with O_NOFOLLOW.
+/// macOS: openat2() is not available. Fall back to openat() with O_SYMLINK.
 /// This does NOT provide RESOLVE_IN_ROOT semantics — callers relying on that
 /// must ensure the sandbox is set up via chroot or other means.
+//
+// Darwin's `O_SYMLINK` substitutes for Linux's `O_PATH | O_NOFOLLOW` when the
+// trailing component is a symlink: it opens a reference to the symlink itself
+// rather than failing with `ELOOP` (which is what `O_NOFOLLOW` does on
+// Darwin). It is a no-op for non-symlinks.
 // TODO(macos): This fallback does not prevent symlink-based escapes the way
 // RESOLVE_IN_ROOT does. A proper implementation would need to walk path
 // components and validate each one.
@@ -398,8 +403,9 @@ pub fn do_open_relative_to(
     mode: Option<u32>,
 ) -> Result<RawFd> {
     let mode = u64::from(mode.unwrap_or(0)) & 0o7777;
-    // Use openat with O_NOFOLLOW to at least prevent following the final symlink
-    let flags = flags | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // Strip O_NOFOLLOW (Darwin returns ELOOP for any symlink leaf) and use
+    // O_SYMLINK instead so symlink leaves resolve to a usable fd.
+    let flags = (flags & !libc::O_NOFOLLOW) | libc::O_SYMLINK | libc::O_CLOEXEC;
     check_retval(unsafe {
         libc::openat(
             dir.as_raw_fd(),

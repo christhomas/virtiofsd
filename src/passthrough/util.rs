@@ -614,4 +614,246 @@ mod tests {
             assert_eq!(size_of(&f), 100);
         }
     }
+
+    /// macOS-only: pin the syscall contract this port depends on for symlink
+    /// lookups. On Darwin, `openat(dirfd, name, O_RDONLY|O_NOFOLLOW)` returns
+    /// `ELOOP` for any symlink leaf — not just chained or dangling ones, but
+    /// every symlink. That is why every guest FUSE `LOOKUP` of a symlink (the
+    /// `pnpm` `.pnpm` layout, `rm` of a dangling link, `ls -la` of a symlink)
+    /// was failing with "Too many levels of symbolic links" through this
+    /// port. `O_SYMLINK` is Darwin's equivalent of Linux's `O_PATH | O_NOFOLLOW`.
+    /// If either of these contracts ever drifts, the symlink fix in
+    /// `open_relative_to`/`readlink` will silently break — these tests pin
+    /// both the bug and the fix.
+    #[cfg(target_os = "macos")]
+    mod macos_symlink_open {
+        use std::ffi::CString;
+        use std::io::Write;
+        use std::os::unix::io::AsRawFd;
+        use std::path::Path;
+
+        struct TestTree {
+            dir: tempfile::TempDir,
+        }
+
+        impl TestTree {
+            fn new() -> Self {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let root = dir.path();
+                std::fs::write(root.join("real.txt"), b"hello").unwrap();
+                // chain: link3 -> link2 -> link1 -> link_to_real -> real.txt
+                std::os::unix::fs::symlink("real.txt", root.join("link_to_real")).unwrap();
+                std::os::unix::fs::symlink("link_to_real", root.join("link1")).unwrap();
+                std::os::unix::fs::symlink("link1", root.join("link2")).unwrap();
+                std::os::unix::fs::symlink("link2", root.join("link3")).unwrap();
+                // dangling: target doesn't exist
+                std::os::unix::fs::symlink(
+                    "no_such_target_anywhere",
+                    root.join("link_dangling"),
+                )
+                .unwrap();
+                Self { dir }
+            }
+
+            fn open_dirfd(&self) -> std::fs::File {
+                use std::os::fd::FromRawFd;
+                let cpath = CString::new(self.dir.path().as_os_str().as_encoded_bytes()).unwrap();
+                let fd = unsafe {
+                    libc::open(
+                        cpath.as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                    )
+                };
+                assert!(fd >= 0, "open dir: {}", std::io::Error::last_os_error());
+                unsafe { std::fs::File::from_raw_fd(fd) }
+            }
+
+            fn path(&self) -> &Path {
+                self.dir.path()
+            }
+        }
+
+        fn openat_with(dirfd: i32, name: &str, flags: i32) -> std::io::Result<i32> {
+            let cname = CString::new(name).unwrap();
+            let fd = unsafe { libc::openat(dirfd, cname.as_ptr(), flags, 0) };
+            if fd < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(fd)
+            }
+        }
+
+        #[test]
+        fn nofollow_on_symlink_errors_with_eloop_pre_fix() {
+            // Documents the Darwin behavior the fix exists to work around.
+            // `openat(..., O_RDONLY | O_NOFOLLOW)` is what the pre-fix code
+            // path did on macOS (`O_PATH_OR_RDONLY = O_RDONLY` + `O_NOFOLLOW`
+            // added in `open_relative_to`). Any symlink — chained, dangling,
+            // or pointing to a real file — failed with `ELOOP`. If this test
+            // ever stops returning `ELOOP`, Apple has changed the behavior
+            // and the workaround can be revisited.
+            let tree = TestTree::new();
+            let dir = tree.open_dirfd();
+            for name in &["link_to_real", "link1", "link3", "link_dangling"] {
+                let err = match openat_with(
+                    dir.as_raw_fd(),
+                    name,
+                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                ) {
+                    Ok(fd) => {
+                        unsafe { libc::close(fd) };
+                        panic!("{} should fail with ELOOP under O_NOFOLLOW", name);
+                    }
+                    Err(e) => e,
+                };
+                assert_eq!(
+                    err.raw_os_error(),
+                    Some(libc::ELOOP),
+                    "{name}: expected ELOOP, got {err}"
+                );
+            }
+        }
+
+        #[test]
+        fn o_symlink_opens_symlink_itself() {
+            // The fix: `O_SYMLINK` (Darwin) substitutes for Linux's
+            // `O_PATH | O_NOFOLLOW`. Opening any symlink succeeds and the
+            // resulting fd refers to the symlink itself — `fstat` reports
+            // `S_IFLNK`. Verifies the substitution in `open_relative_to`
+            // produces a usable inode reference for symlinks (which is what
+            // `do_lookup` needs to stat them and return a `FUSE` `LOOKUP`
+            // reply).
+            let tree = TestTree::new();
+            let dir = tree.open_dirfd();
+            for name in &["link_to_real", "link1", "link3", "link_dangling"] {
+                let fd = openat_with(
+                    dir.as_raw_fd(),
+                    name,
+                    libc::O_RDONLY | libc::O_SYMLINK | libc::O_CLOEXEC,
+                )
+                .unwrap_or_else(|e| panic!("{} O_SYMLINK open failed: {}", name, e));
+                let mut st: libc::stat = unsafe { std::mem::zeroed() };
+                let r = unsafe { libc::fstat(fd, &mut st) };
+                assert_eq!(r, 0, "fstat {name}: {}", std::io::Error::last_os_error());
+                assert_eq!(
+                    st.st_mode as u32 & libc::S_IFMT as u32,
+                    libc::S_IFLNK as u32,
+                    "{name}: O_SYMLINK fd should report S_IFLNK"
+                );
+                unsafe { libc::close(fd) };
+            }
+        }
+
+        #[test]
+        fn o_symlink_is_noop_for_regular_files_and_dirs() {
+            // `O_SYMLINK` must not change behavior for non-symlink leaves —
+            // otherwise the substitution in `open_relative_to` would break
+            // every non-symlink lookup. `O_SYMLINK` on a regular file opens
+            // for read normally; on a directory opens the directory.
+            let tree = TestTree::new();
+            let dir = tree.open_dirfd();
+            let fd = openat_with(
+                dir.as_raw_fd(),
+                "real.txt",
+                libc::O_RDONLY | libc::O_SYMLINK | libc::O_CLOEXEC,
+            )
+            .expect("regular file open should succeed");
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            assert_eq!(unsafe { libc::fstat(fd, &mut st) }, 0);
+            assert_eq!(
+                st.st_mode as u32 & libc::S_IFMT as u32,
+                libc::S_IFREG as u32
+            );
+            unsafe { libc::close(fd) };
+
+            let fd = openat_with(
+                dir.as_raw_fd(),
+                ".",
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_SYMLINK | libc::O_CLOEXEC,
+            )
+            .expect("directory open should succeed");
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            assert_eq!(unsafe { libc::fstat(fd, &mut st) }, 0);
+            assert_eq!(
+                st.st_mode as u32 & libc::S_IFMT as u32,
+                libc::S_IFDIR as u32
+            );
+            unsafe { libc::close(fd) };
+        }
+
+        #[test]
+        fn readlink_works_via_fgetpath_on_o_symlink_fd() {
+            // `readlinkat(fd, "", buf, n)` returns `ENOENT` on Darwin because
+            // there is no `AT_EMPTY_PATH`. The fix in `mod.rs::readlink`
+            // resolves the symlink fd's path via `F_GETPATH` and then calls
+            // `readlink(path, ...)`. Both pieces must work: pin them here so
+            // `readlink()` over FUSE doesn't silently return `ENOENT`.
+            let tree = TestTree::new();
+            let dir = tree.open_dirfd();
+            for (name, expected) in &[
+                ("link_to_real", "real.txt"),
+                ("link1", "link_to_real"),
+                ("link3", "link2"),
+                ("link_dangling", "no_such_target_anywhere"),
+            ] {
+                let fd = openat_with(
+                    dir.as_raw_fd(),
+                    name,
+                    libc::O_RDONLY | libc::O_SYMLINK | libc::O_CLOEXEC,
+                )
+                .expect("O_SYMLINK open");
+
+                // Confirm the empty-path readlinkat does NOT work on Darwin
+                // — this is the contract reason we need the F_GETPATH path.
+                let mut sink = [0u8; 256];
+                let r = unsafe {
+                    libc::readlinkat(
+                        fd,
+                        b"\0".as_ptr() as *const libc::c_char,
+                        sink.as_mut_ptr() as *mut libc::c_char,
+                        sink.len(),
+                    )
+                };
+                assert!(
+                    r < 0,
+                    "{}: readlinkat(fd, \"\") unexpectedly succeeded on Darwin",
+                    name
+                );
+
+                // F_GETPATH → readlink(path) path that the fix uses.
+                let mut pbuf = vec![0u8; libc::PATH_MAX as usize];
+                let r = unsafe { libc::fcntl(fd, libc::F_GETPATH, pbuf.as_mut_ptr()) };
+                assert_eq!(r, 0, "F_GETPATH for {name}");
+
+                let mut tbuf = vec![0u8; libc::PATH_MAX as usize];
+                let n = unsafe {
+                    libc::readlink(
+                        pbuf.as_ptr() as *const libc::c_char,
+                        tbuf.as_mut_ptr() as *mut libc::c_char,
+                        tbuf.len(),
+                    )
+                };
+                assert!(n > 0, "readlink for {name}: {}", std::io::Error::last_os_error());
+                let target = std::str::from_utf8(&tbuf[..n as usize]).unwrap();
+                assert_eq!(target, *expected, "{name} target");
+
+                // Sanity check: F_GETPATH on an O_SYMLINK fd should still
+                // resolve to a path that lives under the tree.
+                let path_nul =
+                    pbuf.iter().position(|&b| b == 0).unwrap_or(pbuf.len());
+                let path = std::str::from_utf8(&pbuf[..path_nul]).unwrap();
+                let root = std::fs::canonicalize(tree.path()).unwrap();
+                let root_str = root.to_str().unwrap();
+                assert!(
+                    path.starts_with(root_str),
+                    "{}: F_GETPATH path {:?} not under tree {:?}",
+                    name,
+                    path,
+                    root_str
+                );
+
+                unsafe { libc::close(fd) };
+            }
+        }
+    }
 }
