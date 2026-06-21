@@ -350,16 +350,16 @@ impl serialized::Inode {
         filename: &str,
     ) -> io::Result<InodeData> {
         let parent_fd = parent.get().get_file()?;
-        let fd = openat(
-            &parent_fd,
-            filename,
+        let fd = openat(&parent_fd, filename, {
+            #[cfg(target_os = "linux")]
             {
-                #[cfg(target_os = "linux")]
-                { libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC }
-                #[cfg(target_os = "macos")]
-                { libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC }
-            },
-        )
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC
+            }
+            #[cfg(target_os = "macos")]
+            {
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC
+            }
+        })
         .map_err(|err| {
             let pfd = printable_fd(&parent_fd, Some(&fs.proc_self_fd));
             io::Error::new(

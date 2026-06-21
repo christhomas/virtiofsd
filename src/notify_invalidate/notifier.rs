@@ -77,10 +77,8 @@ impl Notification {
                     flags: 0,
                 };
                 // namelen excludes the trailing NUL; +1 for the NUL itself.
-                let total_len = size_of::<OutHeader>()
-                    + size_of::<NotifyInvalEntryOut>()
-                    + name.len()
-                    + 1;
+                let total_len =
+                    size_of::<OutHeader>() + size_of::<NotifyInvalEntryOut>() + name.len() + 1;
                 let header = OutHeader {
                     len: total_len as u32,
                     error: -(NotifyOpcode::InvalEntry as i32),
@@ -239,16 +237,16 @@ mod tests {
 
         // Header: { len, error: -2 (InvalInode), unique: 0 }
         let header_bytes = &bytes[..size_of::<OutHeader>()];
-        let header: OutHeader = unsafe { std::ptr::read_unaligned(header_bytes.as_ptr() as *const OutHeader) };
+        let header: OutHeader =
+            unsafe { std::ptr::read_unaligned(header_bytes.as_ptr() as *const OutHeader) };
         assert_eq!(header.unique, 0);
         assert_eq!(header.error, -(NotifyOpcode::InvalInode as i32));
         assert_eq!(header.len as usize, bytes.len());
 
         // Body: { ino: 42, off: 0, len: -1 }
         let body_bytes = &bytes[size_of::<OutHeader>()..];
-        let body: NotifyInvalInodeOut = unsafe {
-            std::ptr::read_unaligned(body_bytes.as_ptr() as *const NotifyInvalInodeOut)
-        };
+        let body: NotifyInvalInodeOut =
+            unsafe { std::ptr::read_unaligned(body_bytes.as_ptr() as *const NotifyInvalInodeOut) };
         assert_eq!(body.ino, 42);
         assert_eq!(body.off, 0);
         assert_eq!(body.len, -1);
@@ -283,8 +281,11 @@ mod tests {
     fn capturing_notifier_records() {
         let n = CapturingNotifier::new();
         n.send(Notification::InvalInode { inode: 1 }).unwrap();
-        n.send(Notification::InvalEntry { parent: 1, name: b"x".to_vec() })
-            .unwrap();
+        n.send(Notification::InvalEntry {
+            parent: 1,
+            name: b"x".to_vec(),
+        })
+        .unwrap();
         let got = n.drain();
         assert_eq!(got.len(), 2);
     }

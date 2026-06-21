@@ -94,13 +94,7 @@ impl DentryIndex {
     /// Atomically rename `(old_parent, old_name) -> (new_parent, new_name)`.
     /// If `(new_parent, new_name)` already pointed at an inode (overwrite case),
     /// that mapping is dropped first.
-    pub fn rename(
-        &self,
-        old_parent: Inode,
-        old_name: &[u8],
-        new_parent: Inode,
-        new_name: &[u8],
-    ) {
+    pub fn rename(&self, old_parent: Inode, old_name: &[u8], new_parent: Inode, new_name: &[u8]) {
         let old_key = (old_parent, old_name.to_vec());
         let new_key = (new_parent, new_name.to_vec());
         let mut inner = self.inner.write().unwrap();
@@ -139,7 +133,12 @@ impl DentryIndex {
     /// Look up the FUSE inode for `(parent, name)` if one is currently
     /// recorded.
     pub fn get(&self, parent: Inode, name: &[u8]) -> Option<Inode> {
-        self.inner.read().unwrap().forward.get(&(parent, name.to_vec())).copied()
+        self.inner
+            .read()
+            .unwrap()
+            .forward
+            .get(&(parent, name.to_vec()))
+            .copied()
     }
 
     /// Walk the path components from the given root, returning the deepest
@@ -158,11 +157,7 @@ impl DentryIndex {
     ///     name: remaining[0] }`.
     ///   * If `remaining` has length > 1, the guest has never looked up this
     ///     subtree, so there is nothing to invalidate.
-    pub fn resolve_path(
-        &self,
-        root: Inode,
-        path: &Path,
-    ) -> (Inode, Vec<Name>) {
+    pub fn resolve_path(&self, root: Inode, path: &Path) -> (Inode, Vec<Name>) {
         let segments: Vec<Name> = path
             .components()
             .filter_map(|c| match c {
@@ -272,10 +267,7 @@ mod tests {
         idx.insert(ROOT, b"b", 2);
         let mut names = idx.names_for(2);
         names.sort();
-        assert_eq!(
-            names,
-            vec![(ROOT, b"a".to_vec()), (ROOT, b"b".to_vec())]
-        );
+        assert_eq!(names, vec![(ROOT, b"a".to_vec()), (ROOT, b"b".to_vec())]);
     }
 
     #[test]

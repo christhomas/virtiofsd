@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#[cfg(target_os = "macos")]
+use crate::idmap::{GidMap, UidMap};
 #[cfg(target_os = "linux")]
 use crate::{idmap, oslib, passthrough, util};
 #[cfg(target_os = "linux")]
 use idmap::{GidMap, IdMapSetUpPipeMessage, UidMap};
-#[cfg(target_os = "macos")]
-use crate::idmap::{GidMap, UidMap};
 use std::ffi::CString;
 use std::fs::{self, File};
 #[cfg(target_os = "linux")]

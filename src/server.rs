@@ -49,69 +49,69 @@ fn errno_to_linux(errno: i32) -> i32 {
     // silently-wrong entry that previously translated EOPNOTSUPP to
     // ENETRESET and broke `qemu-img convert` over virtio-fs.
     match errno {
-        35 => 11,   // EAGAIN/EWOULDBLOCK: macOS=35,  Linux=11
-        36 => 115,  // EINPROGRESS:        macOS=36,  Linux=115
-        37 => 114,  // EALREADY:           macOS=37,  Linux=114
-        38 => 88,   // ENOTSOCK:           macOS=38,  Linux=88
-        39 => 89,   // EDESTADDRREQ:       macOS=39,  Linux=89
-        40 => 90,   // EMSGSIZE:           macOS=40,  Linux=90
-        41 => 91,   // EPROTOTYPE:         macOS=41,  Linux=91
-        42 => 92,   // ENOPROTOOPT:        macOS=42,  Linux=92
-        43 => 93,   // EPROTONOSUPPORT:    macOS=43,  Linux=93
-        44 => 94,   // ESOCKTNOSUPPORT:    macOS=44,  Linux=94
-        45 => 95,   // ENOTSUP/EOPNOTSUPP: macOS=45,  Linux=95 (POSIX-flavor)
-        46 => 96,   // EPFNOSUPPORT:       macOS=46,  Linux=96
-        47 => 97,   // EAFNOSUPPORT:       macOS=47,  Linux=97
-        48 => 98,   // EADDRINUSE:         macOS=48,  Linux=98
-        49 => 99,   // EADDRNOTAVAIL:      macOS=49,  Linux=99
-        50 => 100,  // ENETDOWN:           macOS=50,  Linux=100
-        51 => 101,  // ENETUNREACH:        macOS=51,  Linux=101
-        52 => 102,  // ENETRESET:          macOS=52,  Linux=102
-        53 => 103,  // ECONNABORTED:       macOS=53,  Linux=103
-        54 => 104,  // ECONNRESET:         macOS=54,  Linux=104
-        55 => 105,  // ENOBUFS:            macOS=55,  Linux=105
-        56 => 106,  // EISCONN:            macOS=56,  Linux=106
-        57 => 107,  // ENOTCONN:           macOS=57,  Linux=107
-        58 => 108,  // ESHUTDOWN:          macOS=58,  Linux=108
-        59 => 109,  // ETOOMANYREFS:       macOS=59,  Linux=109
-        60 => 110,  // ETIMEDOUT:          macOS=60,  Linux=110
-        61 => 111,  // ECONNREFUSED:       macOS=61,  Linux=111
-        62 => 40,   // ELOOP:              macOS=62,  Linux=40
-        63 => 36,   // ENAMETOOLONG:       macOS=63,  Linux=36
-        64 => 112,  // EHOSTDOWN:          macOS=64,  Linux=112
-        65 => 113,  // EHOSTUNREACH:       macOS=65,  Linux=113
-        66 => 39,   // ENOTEMPTY:          macOS=66,  Linux=39
-        69 => 122,  // EDQUOT:             macOS=69,  Linux=122
-        70 => 116,  // ESTALE:             macOS=70,  Linux=116
-        77 => 37,   // ENOLCK:             macOS=77,  Linux=37
-        78 => 38,   // ENOSYS:             macOS=78,  Linux=38
-        84 => 75,   // EOVERFLOW:          macOS=84,  Linux=75
-        89 => 125,  // ECANCELED:          macOS=89,  Linux=125
-        90 => 43,   // EIDRM:              macOS=90,  Linux=43
-        91 => 42,   // ENOMSG:             macOS=91,  Linux=42
-        92 => 84,   // EILSEQ:             macOS=92,  Linux=84
-        93 => 61,   // ENOATTR -> ENODATA: macOS=93,  Linux=61.
-                    // Without this, APFS returning ENOATTR for missing xattrs
-                    // (e.g. security.selinux, system.posix_acl_*) reaches the
-                    // guest as Linux 93=EPROTONOSUPPORT, breaking `ls -la`.
-        94 => 74,   // EBADMSG:            macOS=94,  Linux=74
-        95 => 72,   // EMULTIHOP:          macOS=95,  Linux=72
-        96 => 61,   // ENODATA:            macOS=96,  Linux=61 (same Linux peer as ENOATTR)
-        97 => 67,   // ENOLINK:            macOS=97,  Linux=67
-        98 => 63,   // ENOSR:              macOS=98,  Linux=63
-        99 => 60,   // ENOSTR:             macOS=99,  Linux=60
-        100 => 71,  // EPROTO:             macOS=100, Linux=71
-        101 => 62,  // ETIME:              macOS=101, Linux=62
-        102 => 95,  // EOPNOTSUPP:         macOS=102, Linux=95 (BSD-flavor — the
-                    // value `libc::EOPNOTSUPP` actually compiles to on Darwin).
-                    // Until this entry existed, our `fallocate` returning
-                    // EOPNOTSUPP for unsupported modes reached the guest as
-                    // Linux 102=ENETRESET, surfacing as
-                    // "Network dropped connection on reset" out of `qemu-img`.
+        35 => 11,  // EAGAIN/EWOULDBLOCK: macOS=35,  Linux=11
+        36 => 115, // EINPROGRESS:        macOS=36,  Linux=115
+        37 => 114, // EALREADY:           macOS=37,  Linux=114
+        38 => 88,  // ENOTSOCK:           macOS=38,  Linux=88
+        39 => 89,  // EDESTADDRREQ:       macOS=39,  Linux=89
+        40 => 90,  // EMSGSIZE:           macOS=40,  Linux=90
+        41 => 91,  // EPROTOTYPE:         macOS=41,  Linux=91
+        42 => 92,  // ENOPROTOOPT:        macOS=42,  Linux=92
+        43 => 93,  // EPROTONOSUPPORT:    macOS=43,  Linux=93
+        44 => 94,  // ESOCKTNOSUPPORT:    macOS=44,  Linux=94
+        45 => 95,  // ENOTSUP/EOPNOTSUPP: macOS=45,  Linux=95 (POSIX-flavor)
+        46 => 96,  // EPFNOSUPPORT:       macOS=46,  Linux=96
+        47 => 97,  // EAFNOSUPPORT:       macOS=47,  Linux=97
+        48 => 98,  // EADDRINUSE:         macOS=48,  Linux=98
+        49 => 99,  // EADDRNOTAVAIL:      macOS=49,  Linux=99
+        50 => 100, // ENETDOWN:           macOS=50,  Linux=100
+        51 => 101, // ENETUNREACH:        macOS=51,  Linux=101
+        52 => 102, // ENETRESET:          macOS=52,  Linux=102
+        53 => 103, // ECONNABORTED:       macOS=53,  Linux=103
+        54 => 104, // ECONNRESET:         macOS=54,  Linux=104
+        55 => 105, // ENOBUFS:            macOS=55,  Linux=105
+        56 => 106, // EISCONN:            macOS=56,  Linux=106
+        57 => 107, // ENOTCONN:           macOS=57,  Linux=107
+        58 => 108, // ESHUTDOWN:          macOS=58,  Linux=108
+        59 => 109, // ETOOMANYREFS:       macOS=59,  Linux=109
+        60 => 110, // ETIMEDOUT:          macOS=60,  Linux=110
+        61 => 111, // ECONNREFUSED:       macOS=61,  Linux=111
+        62 => 40,  // ELOOP:              macOS=62,  Linux=40
+        63 => 36,  // ENAMETOOLONG:       macOS=63,  Linux=36
+        64 => 112, // EHOSTDOWN:          macOS=64,  Linux=112
+        65 => 113, // EHOSTUNREACH:       macOS=65,  Linux=113
+        66 => 39,  // ENOTEMPTY:          macOS=66,  Linux=39
+        69 => 122, // EDQUOT:             macOS=69,  Linux=122
+        70 => 116, // ESTALE:             macOS=70,  Linux=116
+        77 => 37,  // ENOLCK:             macOS=77,  Linux=37
+        78 => 38,  // ENOSYS:             macOS=78,  Linux=38
+        84 => 75,  // EOVERFLOW:          macOS=84,  Linux=75
+        89 => 125, // ECANCELED:          macOS=89,  Linux=125
+        90 => 43,  // EIDRM:              macOS=90,  Linux=43
+        91 => 42,  // ENOMSG:             macOS=91,  Linux=42
+        92 => 84,  // EILSEQ:             macOS=92,  Linux=84
+        93 => 61,  // ENOATTR -> ENODATA: macOS=93,  Linux=61.
+        // Without this, APFS returning ENOATTR for missing xattrs
+        // (e.g. security.selinux, system.posix_acl_*) reaches the
+        // guest as Linux 93=EPROTONOSUPPORT, breaking `ls -la`.
+        94 => 74,  // EBADMSG:            macOS=94,  Linux=74
+        95 => 72,  // EMULTIHOP:          macOS=95,  Linux=72
+        96 => 61,  // ENODATA:            macOS=96,  Linux=61 (same Linux peer as ENOATTR)
+        97 => 67,  // ENOLINK:            macOS=97,  Linux=67
+        98 => 63,  // ENOSR:              macOS=98,  Linux=63
+        99 => 60,  // ENOSTR:             macOS=99,  Linux=60
+        100 => 71, // EPROTO:             macOS=100, Linux=71
+        101 => 62, // ETIME:              macOS=101, Linux=62
+        102 => 95, // EOPNOTSUPP:         macOS=102, Linux=95 (BSD-flavor — the
+        // value `libc::EOPNOTSUPP` actually compiles to on Darwin).
+        // Until this entry existed, our `fallocate` returning
+        // EOPNOTSUPP for unsupported modes reached the guest as
+        // Linux 102=ENETRESET, surfacing as
+        // "Network dropped connection on reset" out of `qemu-img`.
         104 => 131, // ENOTRECOVERABLE:    macOS=104, Linux=131
         105 => 130, // EOWNERDEAD:         macOS=105, Linux=130
         _ => errno, // Pass through 1..=34 (EPERM..ERANGE — they agree)
-                    // and macOS-only values with no Linux peer.
+                     // and macOS-only values with no Linux peer.
     }
 }
 const DIRENT_PADDING: [u8; 8] = [0; 8];
@@ -1907,7 +1907,11 @@ mod tests {
             libc::ENODATA,
             libc::EOWNERDEAD,
         ] {
-            assert_eq!(errno_to_linux(v), v, "errno {v} should pass through on Linux");
+            assert_eq!(
+                errno_to_linux(v),
+                v,
+                "errno {v} should pass through on Linux"
+            );
         }
     }
 

@@ -61,7 +61,10 @@ pub enum HostEventKind {
     /// Either `from` or `to` may be `None` if `notify` could not pair the
     /// rename halves (e.g. when the rename happens across the watched
     /// boundary).
-    Rename { from: Option<PathBuf>, to: Option<PathBuf> },
+    Rename {
+        from: Option<PathBuf>,
+        to: Option<PathBuf>,
+    },
     /// The host watcher dropped events. The translator should respond by
     /// invalidating every cached inode it knows about.
     Overflow,
@@ -119,11 +122,10 @@ impl HostWatcher {
         // get a bounded channel with try_send semantics for overflow
         // detection.
         let tx_clone = tx.clone();
-        let mut watcher: RecommendedWatcher = notify::recommended_watcher(
-            move |res: notify::Result<Event>| {
+        let mut watcher: RecommendedWatcher =
+            notify::recommended_watcher(move |res: notify::Result<Event>| {
                 handle_raw_event(res, &tx_clone);
-            },
-        )?;
+            })?;
         watcher.watch(&canonical, RecursiveMode::Recursive)?;
 
         info!(
@@ -182,7 +184,12 @@ fn handle_raw_event(res: notify::Result<Event>, tx: &Sender<HostEvent>) {
         Ok(e) => e,
         Err(err) => {
             warn!("notify-invalidate: backend error, treating as overflow: {err}");
-            let _ = try_send(tx, HostEvent { kind: HostEventKind::Overflow });
+            let _ = try_send(
+                tx,
+                HostEvent {
+                    kind: HostEventKind::Overflow,
+                },
+            );
             return;
         }
     };
@@ -195,7 +202,12 @@ fn handle_raw_event(res: notify::Result<Event>, tx: &Sender<HostEvent>) {
                 // Channel full — translator can't keep up. Drop and signal
                 // overflow so the next free slot triggers bulk invalidate.
                 warn!("notify-invalidate: event channel full, signalling overflow");
-                let _ = try_send(tx, HostEvent { kind: HostEventKind::Overflow });
+                let _ = try_send(
+                    tx,
+                    HostEvent {
+                        kind: HostEventKind::Overflow,
+                    },
+                );
             }
         }
         None => {

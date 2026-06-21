@@ -18,6 +18,7 @@ use log::*;
 use vhost::vhost_user::message::*;
 use vhost::vhost_user::Backend;
 use vhost_user_backend::bitmap::BitmapMmapRegion;
+use vhost_user_backend::EventSet;
 use vhost_user_backend::{VhostUserBackend, VringMutex, VringState, VringT};
 use virtio_bindings::bindings::virtio_config::*;
 use virtio_bindings::bindings::virtio_ring::{
@@ -27,7 +28,6 @@ use virtio_queue::{DescriptorChain, QueueOwnedT};
 use vm_memory::{
     ByteValued, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard, GuestMemoryMmap, Le32,
 };
-use vhost_user_backend::EventSet;
 use vmm_sys_util::event::{
     new_event_consumer_and_notifier, EventConsumer, EventFlag, EventNotifier,
 };
@@ -59,13 +59,13 @@ const NUM_QUEUES_WITH_NOTIF: usize = REQUEST_QUEUES as usize + 2;
 const VIRTIO_FS_F_NOTIFICATION: u64 = 1 << 0;
 
 // The guest queued an available buffer for the high priority queue.
-const HIPRIO_QUEUE_EVENT: usize =0;
+const HIPRIO_QUEUE_EVENT: usize = 0;
 // The guest queued an available buffer for the request queue (when the
 // notification feature is *not* negotiated).
-const REQ_QUEUE_EVENT_NO_NOTIF: usize =1;
+const REQ_QUEUE_EVENT_NO_NOTIF: usize = 1;
 // With the notification feature negotiated, the queue indices shift:
-const NOTIF_QUEUE_EVENT: usize =1;
-const REQ_QUEUE_EVENT_WITH_NOTIF: usize =2;
+const NOTIF_QUEUE_EVENT: usize = 1;
+const REQ_QUEUE_EVENT_WITH_NOTIF: usize = 2;
 
 /// The maximum length of the tag being used.
 pub const MAX_TAG_LEN: usize = 36;
@@ -180,10 +180,7 @@ impl NotifierState {
 }
 
 impl Notifier for NotifierState {
-    fn send(
-        &self,
-        notification: Notification,
-    ) -> std::result::Result<(), NotifierError> {
+    fn send(&self, notification: Notification) -> std::result::Result<(), NotifierError> {
         use std::io::Write as _;
 
         if !self.enabled {
@@ -258,11 +255,7 @@ struct VhostUserFsThread<F: FileSystem + Send + Sync + 'static> {
 }
 
 impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFsThread<F> {
-    fn new(
-        fs: F,
-        thread_pool_size: usize,
-        notifier_state: Arc<NotifierState>,
-    ) -> Result<Self> {
+    fn new(fs: F, thread_pool_size: usize, notifier_state: Arc<NotifierState>) -> Result<Self> {
         let pool = if thread_pool_size > 0 {
             // Test that unshare(CLONE_FS) works, it will be called for each thread.
             // It's an unprivileged system call but some Docker/Moby versions are

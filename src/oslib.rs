@@ -144,7 +144,12 @@ pub fn mount(source: Option<&str>, target: &str, fstype: Option<&str>, flags: u6
 
 /// macOS: mount() stub — namespaces/bind mounts are not supported on macOS.
 #[cfg(target_os = "macos")]
-pub fn mount(_source: Option<&str>, _target: &str, _fstype: Option<&str>, _flags: u64) -> Result<()> {
+pub fn mount(
+    _source: Option<&str>,
+    _target: &str,
+    _fstype: Option<&str>,
+    _flags: u64,
+) -> Result<()> {
     // No-op: mount namespaces don't exist on macOS
     Ok(())
 }

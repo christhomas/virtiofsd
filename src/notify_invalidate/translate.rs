@@ -93,7 +93,9 @@ impl Translator {
             HostEventKind::Modify { path } => self.handle_modify(&path),
             HostEventKind::Create { path } => self.handle_parent_change(&path),
             HostEventKind::Remove { path } => self.handle_remove(&path),
-            HostEventKind::Rename { from, to } => self.handle_rename(from.as_deref(), to.as_deref()),
+            HostEventKind::Rename { from, to } => {
+                self.handle_rename(from.as_deref(), to.as_deref())
+            }
             HostEventKind::Overflow => self.bulk_invalidate(),
         }
     }
@@ -170,11 +172,7 @@ impl Translator {
         Ok(())
     }
 
-    fn handle_rename(
-        &self,
-        from: Option<&Path>,
-        to: Option<&Path>,
-    ) -> Result<(), TranslateError> {
+    fn handle_rename(&self, from: Option<&Path>, to: Option<&Path>) -> Result<(), TranslateError> {
         // Capture the renamed inode (if cached) before dispatching INVAL_ENTRY
         // so we can also flush its content.
         let renamed_inode = from.and_then(|p| {
@@ -223,7 +221,10 @@ impl Translator {
     /// when the path is outside the shared dir (which can happen with
     /// FSEvents on macOS reporting symlink targets).
     fn relativize(&self, host_path: &Path) -> Option<PathBuf> {
-        host_path.strip_prefix(&self.shared_dir).ok().map(Path::to_path_buf)
+        host_path
+            .strip_prefix(&self.shared_dir)
+            .ok()
+            .map(Path::to_path_buf)
     }
 }
 

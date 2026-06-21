@@ -902,14 +902,28 @@ fn main() {
             process::exit(1);
         });
         let dentry_index = notify_pipeline.as_ref().map(|_| fs.enable_dentry_index());
-        run_generic_fs(fs, listener, thread_pool_size, opt.tag, notify_pipeline, dentry_index);
+        run_generic_fs(
+            fs,
+            listener,
+            thread_pool_size,
+            opt.tag,
+            notify_pipeline,
+            dentry_index,
+        );
     } else {
         let mut fs = PassthroughFs::new(fs_cfg).unwrap_or_else(|e| {
             error!("Failed to create internal filesystem representation: {e}");
             process::exit(1);
         });
         let dentry_index = notify_pipeline.as_ref().map(|_| fs.enable_dentry_index());
-        run_generic_fs(fs, listener, thread_pool_size, opt.tag, notify_pipeline, dentry_index);
+        run_generic_fs(
+            fs,
+            listener,
+            thread_pool_size,
+            opt.tag,
+            notify_pipeline,
+            dentry_index,
+        );
     }
 }
 

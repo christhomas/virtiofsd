@@ -45,17 +45,39 @@ pub fn translate_linux_open_flags(linux_flags: i32) -> i32 {
     };
 
     // Map individual flags
-    if linux_flags & LINUX_O_CREAT != 0 { mac_flags |= libc::O_CREAT; }
-    if linux_flags & LINUX_O_EXCL != 0 { mac_flags |= libc::O_EXCL; }
-    if linux_flags & LINUX_O_NOCTTY != 0 { mac_flags |= libc::O_NOCTTY; }
-    if linux_flags & LINUX_O_TRUNC != 0 { mac_flags |= libc::O_TRUNC; }
-    if linux_flags & LINUX_O_APPEND != 0 { mac_flags |= libc::O_APPEND; }
-    if linux_flags & LINUX_O_NONBLOCK != 0 { mac_flags |= libc::O_NONBLOCK; }
-    if linux_flags & LINUX_O_DIRECTORY != 0 { mac_flags |= libc::O_DIRECTORY; }
-    if linux_flags & LINUX_O_NOFOLLOW != 0 { mac_flags |= libc::O_NOFOLLOW; }
-    if linux_flags & LINUX_O_CLOEXEC != 0 { mac_flags |= libc::O_CLOEXEC; }
-    if linux_flags & LINUX_O_SYNC != 0 { mac_flags |= libc::O_SYNC; }
-    if linux_flags & LINUX_O_DSYNC != 0 { mac_flags |= libc::O_DSYNC; }
+    if linux_flags & LINUX_O_CREAT != 0 {
+        mac_flags |= libc::O_CREAT;
+    }
+    if linux_flags & LINUX_O_EXCL != 0 {
+        mac_flags |= libc::O_EXCL;
+    }
+    if linux_flags & LINUX_O_NOCTTY != 0 {
+        mac_flags |= libc::O_NOCTTY;
+    }
+    if linux_flags & LINUX_O_TRUNC != 0 {
+        mac_flags |= libc::O_TRUNC;
+    }
+    if linux_flags & LINUX_O_APPEND != 0 {
+        mac_flags |= libc::O_APPEND;
+    }
+    if linux_flags & LINUX_O_NONBLOCK != 0 {
+        mac_flags |= libc::O_NONBLOCK;
+    }
+    if linux_flags & LINUX_O_DIRECTORY != 0 {
+        mac_flags |= libc::O_DIRECTORY;
+    }
+    if linux_flags & LINUX_O_NOFOLLOW != 0 {
+        mac_flags |= libc::O_NOFOLLOW;
+    }
+    if linux_flags & LINUX_O_CLOEXEC != 0 {
+        mac_flags |= libc::O_CLOEXEC;
+    }
+    if linux_flags & LINUX_O_SYNC != 0 {
+        mac_flags |= libc::O_SYNC;
+    }
+    if linux_flags & LINUX_O_DSYNC != 0 {
+        mac_flags |= libc::O_DSYNC;
+    }
     // O_DIRECT: macOS has no direct equivalent, silently drop it
     // O_NOATIME: macOS has no equivalent, silently drop it
     // O_LARGEFILE: not meaningful on macOS (always 64-bit), drop it
@@ -149,7 +171,12 @@ pub fn translate_linux_seek_whence(linux_whence: i32) -> io::Result<i32> {
 /// Putting the emulation in its own function lets the unit tests
 /// exercise the real syscall sequence on macOS hosts.
 #[cfg(target_os = "macos")]
-pub fn macos_emulate_fallocate(fd: libc::c_int, mode: u32, offset: u64, length: u64) -> io::Result<()> {
+pub fn macos_emulate_fallocate(
+    fd: libc::c_int,
+    mode: u32,
+    offset: u64,
+    length: u64,
+) -> io::Result<()> {
     if mode != 0 {
         return Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
     }
@@ -248,7 +275,11 @@ pub fn reopen_fd_through_proc(
     let ret = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) };
     if ret == -1 {
         let err = io::Error::last_os_error();
-        log::debug!("reopen_fd_through_proc: F_GETPATH failed for fd {}: {}", fd.as_raw_fd(), err);
+        log::debug!(
+            "reopen_fd_through_proc: F_GETPATH failed for fd {}: {}",
+            fd.as_raw_fd(),
+            err
+        );
         return Err(err);
     }
     let path = CStr::from_bytes_until_nul(&buf)
@@ -647,11 +678,8 @@ mod tests {
                 std::os::unix::fs::symlink("link1", root.join("link2")).unwrap();
                 std::os::unix::fs::symlink("link2", root.join("link3")).unwrap();
                 // dangling: target doesn't exist
-                std::os::unix::fs::symlink(
-                    "no_such_target_anywhere",
-                    root.join("link_dangling"),
-                )
-                .unwrap();
+                std::os::unix::fs::symlink("no_such_target_anywhere", root.join("link_dangling"))
+                    .unwrap();
                 Self { dir }
             }
 
@@ -833,14 +861,17 @@ mod tests {
                         tbuf.len(),
                     )
                 };
-                assert!(n > 0, "readlink for {name}: {}", std::io::Error::last_os_error());
+                assert!(
+                    n > 0,
+                    "readlink for {name}: {}",
+                    std::io::Error::last_os_error()
+                );
                 let target = std::str::from_utf8(&tbuf[..n as usize]).unwrap();
                 assert_eq!(target, *expected, "{name} target");
 
                 // Sanity check: F_GETPATH on an O_SYMLINK fd should still
                 // resolve to a path that lives under the tree.
-                let path_nul =
-                    pbuf.iter().position(|&b| b == 0).unwrap_or(pbuf.len());
+                let path_nul = pbuf.iter().position(|&b| b == 0).unwrap_or(pbuf.len());
                 let path = std::str::from_utf8(&pbuf[..path_nul]).unwrap();
                 let root = std::fs::canonicalize(tree.path()).unwrap();
                 let root_str = root.to_str().unwrap();
