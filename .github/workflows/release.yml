@@ -1,0 +1,116 @@
+# Build release binaries and publish them as a GitHub Release.
+#
+# Triggered by pushing a version tag (e.g. `v1.13.8`), or manually via the
+# Actions tab (workflow_dispatch) with an explicit version. Produces one
+# tarball per platform and attaches them to the release. The homebrew-tap
+# formula consumes these assets; refresh its checksums with the tap's
+# "Update formula checksums" workflow after a release is published.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version without the leading v (e.g. 1.13.8)'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.artifact }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            artifact: darwin-arm64
+          - runner: macos-15-intel
+            artifact: darwin-x86_64
+          - runner: ubuntu-latest
+            artifact: linux-x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y -qq libseccomp-dev libcap-ng-dev
+
+      - name: Determine version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build release binary
+        run: cargo build --release --bin virtiofsd
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/virtiofsd dist/
+          cd dist
+          tar czf "virtiofsd-${{ steps.ver.outputs.version }}-${{ matrix.artifact }}.tar.gz" virtiofsd
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: virtiofsd-${{ matrix.artifact }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Determine version and tag
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "tag=v${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: virtiofsd v${{ steps.ver.outputs.version }}
+          files: artifacts/*.tar.gz
+          fail_on_unmatched_files: true
+          body: |
+            virtiofsd v${{ steps.ver.outputs.version }} — macOS port (Apple Silicon + Intel) and Linux x86_64.
+
+            ## Install via Homebrew (macOS)
+            ```
+            brew install antimatter-studios/tap/virtiofsd
+            ```
+
+            The Linux binary is dynamically linked; it needs `libseccomp` and
+            `libcap-ng` available at runtime.

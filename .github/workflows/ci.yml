@@ -1,0 +1,77 @@
+# Format, lint, and test on every push / pull request.
+#
+# The toolchain is pinned (RUST_TOOLCHAIN) so rustfmt and clippy are
+# deterministic — a floating `stable` periodically reformats code or adds lints,
+# which silently turns the pipeline red. Bump the pin deliberately and re-run
+# `cargo fmt` when adopting a newer toolchain.
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_TOOLCHAIN: "1.95.0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy (linux)
+    # Linux only, matching the upstream GitLab pipeline. clippy compiles only the
+    # active target's cfg, so macOS-gated code is not linted here; that code
+    # carries pre-existing lints and is tracked separately to avoid behavioural
+    # changes to the port.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y -qq libseccomp-dev libcap-ng-dev
+      # clippy bug: it suggests C string literals the 2018 edition cannot use.
+      - run: cargo clippy -- -Dwarnings -Aclippy::manual-c-str-literals
+
+  test:
+    name: test (${{ matrix.artifact }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            artifact: linux-x86_64
+          - runner: macos-15
+            artifact: darwin-arm64
+          - runner: macos-15-intel
+            artifact: darwin-x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y -qq libseccomp-dev libcap-ng-dev
+      - run: cargo test
