@@ -48,8 +48,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y -qq libseccomp-dev libcap-ng-dev
-      # clippy bug: it suggests C string literals the 2018 edition cannot use.
-      - run: cargo clippy -- -Dwarnings -Aclippy::manual-c-str-literals
+      # Allowed lints are cross-platform artifacts of the macOS port, seen only
+      # when compiling for Linux:
+      #   manual-c-str-literals — the 2018 edition cannot use C string literals.
+      #   unnecessary-cast      — casts that normalise libc types (e.g. mode_t)
+      #                           are no-ops on Linux but required on macOS.
+      #   infallible-try-from   — a TryFrom that is infallible on Linux only.
+      - run: |
+          cargo clippy -- -Dwarnings \
+            -Aclippy::manual-c-str-literals \
+            -Aclippy::unnecessary-cast \
+            -Aclippy::infallible-try-from
 
   test:
     name: test (${{ matrix.artifact }})

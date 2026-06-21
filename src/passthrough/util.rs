@@ -546,8 +546,17 @@ mod tests {
 
     #[test]
     fn translate_linux_seek_whence_rejects_unknown() {
-        let err = translate_linux_seek_whence(99).unwrap_err();
-        assert_eq!(err.raw_os_error(), Some(libc::EINVAL));
+        // macOS must reject values it cannot map; Linux passes the value
+        // straight through and lets lseek(2) reject it at the syscall.
+        #[cfg(target_os = "macos")]
+        {
+            let err = translate_linux_seek_whence(99).unwrap_err();
+            assert_eq!(err.raw_os_error(), Some(libc::EINVAL));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(translate_linux_seek_whence(99).unwrap(), 99);
+        }
     }
 
     /// macOS-only fallocate emulation tests. They exercise the real

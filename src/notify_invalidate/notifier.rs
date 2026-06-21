@@ -7,9 +7,9 @@
 //! The wire format mirrors a normal FUSE reply, with two twists that come
 //! straight from the kernel side (`fs/fuse/inode.c::fuse_reverse_inval_*`):
 //!
-//! 1. The `unique` field of [`fuse::OutHeader`] is set to **0**. The kernel
+//! 1. The `unique` field of [`OutHeader`] is set to **0**. The kernel
 //!    distinguishes notifications from request replies by this sentinel.
-//! 2. The `error` field encodes the [`fuse::NotifyOpcode`] (negative on the
+//! 2. The `error` field encodes the [`NotifyOpcode`] (negative on the
 //!    wire so the kernel sees it as `-NOTIFY_OPCODE`). Yes, this re-purposing
 //!    of the error field is weird; it is what the protocol specifies.
 //!
@@ -26,7 +26,7 @@ use std::sync::Mutex;
 use log::{debug, warn};
 use vm_memory::ByteValued;
 
-use crate::fuse::{self, NotifyInvalEntryOut, NotifyInvalInodeOut, NotifyOpcode, OutHeader};
+use crate::fuse::{NotifyInvalEntryOut, NotifyInvalInodeOut, NotifyOpcode, OutHeader};
 use crate::passthrough::inode_store::Inode;
 
 /// A single FUSE notification ready to frame and send.

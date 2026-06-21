@@ -6,6 +6,7 @@ use crate::libc_compat as libc;
 
 use crate::filesystem::{DirEntry, DirectoryIterator};
 
+#[cfg(target_os = "macos")]
 use std::convert::TryInto;
 use std::ffi::CStr;
 use std::io;
