@@ -27,7 +27,7 @@ use virtio_queue::{DescriptorChain, QueueOwnedT};
 use vm_memory::{
     ByteValued, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard, GuestMemoryMmap, Le32,
 };
-use vmm_sys_util::epoll::EventSet;
+use vhost_user_backend::EventSet;
 use vmm_sys_util::event::{
     new_event_consumer_and_notifier, EventConsumer, EventFlag, EventNotifier,
 };
@@ -59,13 +59,13 @@ const NUM_QUEUES_WITH_NOTIF: usize = REQUEST_QUEUES as usize + 2;
 const VIRTIO_FS_F_NOTIFICATION: u64 = 1 << 0;
 
 // The guest queued an available buffer for the high priority queue.
-const HIPRIO_QUEUE_EVENT: u16 = 0;
+const HIPRIO_QUEUE_EVENT: usize =0;
 // The guest queued an available buffer for the request queue (when the
 // notification feature is *not* negotiated).
-const REQ_QUEUE_EVENT_NO_NOTIF: u16 = 1;
+const REQ_QUEUE_EVENT_NO_NOTIF: usize =1;
 // With the notification feature negotiated, the queue indices shift:
-const NOTIF_QUEUE_EVENT: u16 = 1;
-const REQ_QUEUE_EVENT_WITH_NOTIF: u16 = 2;
+const NOTIF_QUEUE_EVENT: usize =1;
+const REQ_QUEUE_EVENT_WITH_NOTIF: usize =2;
 
 /// The maximum length of the tag being used.
 pub const MAX_TAG_LEN: usize = 36;
@@ -422,7 +422,7 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
 
     fn handle_event_pool(
         &self,
-        device_event: u16,
+        device_event: usize,
         vrings: &[VringMutex<LoggedMemoryAtomic>],
     ) -> io::Result<()> {
         let notif_enabled = self.notifier_state.enabled;
@@ -485,7 +485,7 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
 
     fn handle_event_serial(
         &self,
-        device_event: u16,
+        device_event: usize,
         vrings: &[VringMutex<LoggedMemoryAtomic>],
     ) -> io::Result<()> {
         let notif_enabled = self.notifier_state.enabled;
@@ -783,12 +783,12 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserBa
 
     fn handle_event(
         &self,
-        device_event: u16,
+        device_event: usize,
         evset: EventSet,
         vrings: &[VringMutex<LoggedMemoryAtomic>],
         _thread_id: usize,
     ) -> io::Result<()> {
-        if evset != EventSet::IN {
+        if !matches!(evset, EventSet::Readable | EventSet::All) {
             return Err(Error::HandleEventNotEpollIn.into());
         }
 

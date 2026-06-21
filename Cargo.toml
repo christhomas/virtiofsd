@@ -1,7 +1,7 @@
 [package]
 name = "virtiofsd"
 description = "A virtio-fs vhost-user device daemon"
-version = "1.13.7"
+version = "1.13.8-rc1"
 authors = ["The Virtiofs Project Developers"]
 edition = "2018"
 homepage = "https://virtio-fs.gitlab.io/"
@@ -33,8 +33,8 @@ log = "0.4"
 clap = { version = "4", features = ["derive"] }
 postcard = { version = "1.0", features = ["use-std"] }
 serde = { version = "1.0", features = ["derive"] }
-vhost-user-backend = "0.21.0"
-vhost = "0.15.0"
+vhost-user-backend = "0.22.0"
+vhost = "0.16.0"
 virtio-bindings = "0.2.7"
 vm-memory = { version = "=0.17.1", features = ["backend-mmap", "backend-atomic"] }
 virtio-queue = "0.17.0"
