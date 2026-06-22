@@ -1,28 +1,117 @@
-# Build release binaries and publish them as a GitHub Release.
+# Release pipeline.
 #
-# Triggered by pushing a version tag (e.g. `v1.13.8`), or manually via the
-# Actions tab (workflow_dispatch) with an explicit version. Produces one
-# tarball per platform and attaches them to the release. The homebrew-tap
-# formula consumes these assets; refresh its checksums with the tap's
-# "Update formula checksums" workflow after a release is published.
+# Fires when a `vX.Y.Z` tag is pushed (or via manual dispatch against an
+# existing tag). It validates the version, builds the `virtiofsd` binary on
+# native runners, attaches the tarballs to a GitHub Release on THIS repo, then
+# renders the Homebrew formula and pushes it to antimatter-studios/homebrew-tap.
+#
+# This is the "source repo owns build + packaging" model: the tap is a thin
+# consumer of the artifacts produced here. (It used to clone this repo and
+# build virtiofsd itself — that stage has been removed.)
+#
+# Targets, all built on NATIVE runners (no cross-compilation):
+#   * darwin-arm64    (macos-15)        — consumed by Homebrew
+#   * darwin-x86_64   (macos-15-intel)  — consumed by Homebrew
+#   * linux-x86_64    (ubuntu-latest)   — downloadable artifact only
+#
+# Prerequisite secret: HOMEBREW_TAP_TOKEN — a fine-grained PAT with
+# contents:write on antimatter-studios/homebrew-tap. GITHUB_TOKEN cannot write
+# to a different repo. If the secret is absent the GitHub Release still
+# succeeds; only the tap publish is skipped (with a warning).
 name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Version without the leading v (e.g. 1.13.8)'
+      tag:
+        description: 'Existing tag to (re)release, e.g. v1.13.8'
         required: true
 
+permissions:
+  contents: write
+
 env:
+  RUST_TOOLCHAIN: "1.95.0"
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Gate everything on a well-formed, monotonically-increasing version so
+  # Homebrew never receives a malformed or regressive release.
+  validate:
+    name: Validate version tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Validate tag format, Cargo.toml match, and monotonic version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RAW="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "Validating release tag: ${RAW}"
+
+          # 1) Format: vMAJOR.MINOR.PATCH with an optional -prerelease suffix
+          #    (e.g. v1.13.8 or v1.13.8-rc1).
+          if ! printf '%s' "${RAW}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::Tag '${RAW}' must be vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-prerelease"
+            exit 1
+          fi
+          VERSION="${RAW#v}"
+
+          # 2) Tag must match Cargo.toml so the built binary reports the same version.
+          CARGO_VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')"
+          if [ "${VERSION}" != "${CARGO_VERSION}" ]; then
+            echo "::error::Tag version '${VERSION}' != Cargo.toml version '${CARGO_VERSION}'. Bump Cargo.toml and re-tag."
+            exit 1
+          fi
+
+          # 3) Must be strictly newer than the latest published release. Map '-'
+          #    to '~' so `sort -V` orders pre-releases before their release
+          #    (1.13.8-rc1 < 1.13.8), matching SemVer.
+          LATEST="$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 200 \
+                      --json tagName,isDraft --jq '.[] | select(.isDraft|not) | .tagName' 2>/dev/null \
+                    | sed 's/^v//' | sort -V | tail -1 || true)"
+          if [ -n "${LATEST}" ]; then
+            # Map '-' to '~' so `sort -V` orders pre-releases before the release
+            # they precede (1.13.8-rc1 < 1.13.8), matching SemVer.
+            new_cmp="$(printf '%s' "${VERSION}" | tr '-' '~')"
+            prev_cmp="$(printf '%s' "${LATEST}" | tr '-' '~')"
+            highest="$(printf '%s\n%s\n' "${new_cmp}" "${prev_cmp}" | sort -V | tail -1)"
+            if [ "${new_cmp}" = "${prev_cmp}" ] || [ "${highest}" != "${new_cmp}" ]; then
+              echo "::error::Version '${VERSION}' is not greater than the latest release '${LATEST}'. Homebrew requires increasing versions."
+              exit 1
+            fi
+            echo "OK: ${VERSION} > ${LATEST}"
+          else
+            echo "OK: first release (${VERSION}); no prior release to compare against."
+          fi
+
+  # A tag pushed past a broken commit must never ship: re-run the test suite.
+  test:
+    name: Test before release
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y -qq libseccomp-dev libcap-ng-dev
+      - run: cargo test
+
   build:
     name: build (${{ matrix.artifact }})
+    needs: test
     strategy:
       fail-fast: false
       matrix:
@@ -36,8 +125,12 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -49,11 +142,8 @@ jobs:
         id: ver
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          fi
+          RAW="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "version=${RAW#v}" >> "$GITHUB_OUTPUT"
 
       - name: Build release binary
         run: cargo build --release --bin virtiofsd
@@ -61,6 +151,7 @@ jobs:
       - name: Package
         shell: bash
         run: |
+          set -eux
           mkdir -p dist
           cp target/release/virtiofsd dist/
           cd dist
@@ -71,41 +162,47 @@ jobs:
           name: virtiofsd-${{ matrix.artifact }}
           path: dist/*.tar.gz
           if-no-files-found: error
+          retention-days: 1
 
   release:
-    name: publish release
+    name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          path: dist
           merge-multiple: true
 
-      - name: Determine version and tag
+      - name: Build SHA256SUMS
+        shell: bash
+        run: |
+          set -eux
+          cd dist
+          shasum -a 256 virtiofsd-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Determine tag and version
         id: ver
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-            echo "tag=v${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
+          RAW="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=${RAW}" >> "$GITHUB_OUTPUT"
+          echo "version=${RAW#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub Release
+      - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
-          name: virtiofsd v${{ steps.ver.outputs.version }}
-          files: artifacts/*.tar.gz
+          name: virtiofsd ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
           fail_on_unmatched_files: true
+          files: |
+            dist/virtiofsd-*.tar.gz
+            dist/SHA256SUMS
           body: |
-            virtiofsd v${{ steps.ver.outputs.version }} — macOS port (Apple Silicon + Intel) and Linux x86_64.
+            virtiofsd ${{ steps.ver.outputs.tag }} — macOS port (Apple Silicon + Intel) and Linux x86_64.
 
             ## Install via Homebrew (macOS)
             ```
@@ -114,3 +211,59 @@ jobs:
 
             The Linux binary is dynamically linked; it needs `libseccomp` and
             `libcap-ng` available at runtime.
+
+  bump-tap:
+    name: Publish to Homebrew tap
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts (for checksums)
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checkout virtiofsd (formula template)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          path: src
+
+      - name: Render formula and push to tap
+        shell: bash
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -eux
+          if [ -z "${TAP_TOKEN:-}" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN not set — skipping Homebrew tap publish. \
+          The GitHub Release was created; add the secret and re-run to publish the formula."
+            exit 0
+          fi
+
+          RAW="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${RAW#v}"
+
+          # The formula is macOS-only, so it needs the two darwin checksums.
+          sha() { shasum -a 256 "dist/virtiofsd-${VERSION}-$1.tar.gz" | cut -d' ' -f1; }
+          SHA_DARWIN_ARM64="$(sha darwin-arm64)"
+          SHA_DARWIN_X86_64="$(sha darwin-x86_64)"
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/antimatter-studios/homebrew-tap.git" tap
+
+          sed \
+            -e "s|@VERSION@|${VERSION}|g" \
+            -e "s|@SHA_DARWIN_ARM64@|${SHA_DARWIN_ARM64}|g" \
+            -e "s|@SHA_DARWIN_X86_64@|${SHA_DARWIN_X86_64}|g" \
+            src/packaging/homebrew/virtiofsd.rb.tmpl > tap/Formula/virtiofsd.rb
+
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/virtiofsd.rb
+          if git diff --cached --quiet; then
+            echo "Formula already up to date for ${VERSION}; nothing to push."
+            exit 0
+          fi
+          git commit -m "virtiofsd ${VERSION}: prebuilt macOS binaries (arm64 + x86_64)"
+          git push
