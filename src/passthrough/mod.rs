@@ -70,6 +70,7 @@ const O_PATH_OR_RDONLY: i32 = libc::O_RDONLY;
 #[cfg(target_os = "linux")]
 const O_PATH_OR_RDONLY: i32 = libc::O_PATH;
 
+#[cfg(target_os = "linux")]
 const EMPTY_CSTR: &[u8] = b"\0";
 
 type Handle = u64;
@@ -2165,6 +2166,7 @@ impl FileSystem for PassthroughFs {
             self.clear_file_capabilities(inode_file.as_raw_fd(), true)?;
 
             // Safe because this is a constant value and a valid C string.
+            #[cfg(target_os = "linux")]
             let empty = unsafe { CStr::from_bytes_with_nul_unchecked(EMPTY_CSTR) };
 
             // Safe because this doesn't modify any memory and we check the return value.

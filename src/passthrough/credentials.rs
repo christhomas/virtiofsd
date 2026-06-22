@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 use crate::oslib;
+#[cfg(target_os = "linux")]
 use crate::passthrough::util::einval;
 use crate::soft_idmap::{HostGid, HostUid, Id};
 use std::io;
@@ -9,6 +10,8 @@ pub struct UnixCredentials {
     uid: HostUid,
     gid: HostGid,
     sup_gids: Vec<HostGid>,
+    // Only consulted on Linux (DAC_OVERRIDE capability handling in `set`).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     keep_capability: bool,
 }
 

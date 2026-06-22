@@ -679,7 +679,7 @@ bitflags! {
     }
 }
 
-/// macOS: RWF flags are not available. WritevFlags has dummy values for API compatibility.
+// macOS: RWF flags are not available. WritevFlags has dummy values for API compatibility.
 #[cfg(target_os = "macos")]
 bitflags! {
     pub struct WritevFlags: i32 {
@@ -711,7 +711,7 @@ bitflags! {
     }
 }
 
-/// macOS: RWF flags are not available. ReadvFlags is an empty bitflags struct.
+// macOS: RWF flags are not available. ReadvFlags is an empty bitflags struct.
 #[cfg(target_os = "macos")]
 bitflags! {
     pub struct ReadvFlags: i32 {

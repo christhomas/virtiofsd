@@ -10,10 +10,12 @@ use crate::filesystem::{DirEntry, DirectoryIterator};
 use std::convert::TryInto;
 use std::ffi::CStr;
 use std::io;
+#[cfg(target_os = "linux")]
 use std::mem::size_of;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::io::AsRawFd;
 
+#[cfg(target_os = "linux")]
 use vm_memory::ByteValued;
 
 #[cfg(target_os = "linux")]
@@ -28,47 +30,18 @@ struct LinuxDirent64 {
 #[cfg(target_os = "linux")]
 unsafe impl ByteValued for LinuxDirent64 {}
 
-/// macOS dirent structure for getdirentries.
-/// On macOS (arm64/x86_64), struct dirent has:
-///   d_ino (u64, offset 0), d_seekoff (u64, offset 8), d_reclen (u16, offset 16),
-///   d_namlen (u16, offset 18), d_type (u8, offset 20), then d_name[] at offset 21.
-///
-/// IMPORTANT: Due to #[repr(C)] alignment padding, size_of::<MacDirent>() = 24,
-/// but d_name actually starts at byte 21. Use MACOS_DIRENT_NAME_OFFSET instead
-/// of size_of::<MacDirent>() to find the name.
-#[cfg(target_os = "macos")]
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct MacDirent {
-    d_ino: libc::ino_t,
-    d_seekoff: u64,
-    d_reclen: u16,
-    d_namlen: u16,
-    d_type: u8,
-    // d_name follows at byte offset 21 (no padding before it)
-}
+// macOS dirent layout for getdirentries (arm64/x86_64):
+//   d_ino (u64, offset 0), d_seekoff (u64, offset 8), d_reclen (u16, offset 16),
+//   d_namlen (u16, offset 18), d_type (u8, offset 20), then d_name[] at offset 21.
+// Fields are read directly from the raw buffer by offset (see
+// MACOS_DIRENT_NAME_OFFSET); a #[repr(C)] struct of these fields would be padded
+// to 24 bytes even though d_name begins at byte 21.
 
 /// The byte offset where d_name starts in the on-disk dirent structure.
-/// This is NOT size_of::<MacDirent>() because the compiler adds 3 bytes of
-/// padding after d_type (u8) to reach 8-byte alignment for the struct.
+/// This is 21, not the padded struct size (24): a #[repr(C)] layout of the
+/// fields above adds 3 bytes of padding after d_type (u8) for alignment.
 #[cfg(target_os = "macos")]
 const MACOS_DIRENT_NAME_OFFSET: usize = 21;
-
-#[cfg(target_os = "macos")]
-impl Default for MacDirent {
-    fn default() -> Self {
-        MacDirent {
-            d_ino: 0,
-            d_seekoff: 0,
-            d_reclen: 0,
-            d_namlen: 0,
-            d_type: 0,
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-unsafe impl ByteValued for MacDirent {}
 
 #[cfg(target_os = "linux")]
 #[derive(Default)]
@@ -149,7 +122,7 @@ impl<P: DerefMut<Target = [u8]>> ReadDir<P> {
     }
 }
 
-/// macOS: Use __getdirentries64 to read directory entries.
+// macOS: Use __getdirentries64 to read directory entries.
 // TODO(macos): __getdirentries64 is a private API on macOS. A more portable
 // approach would be to use fdopendir/readdir_r, but that doesn't fit the
 // buffer-based API as cleanly.

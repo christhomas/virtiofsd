@@ -9,12 +9,16 @@ use crate::{idmap, oslib, passthrough, util};
 #[cfg(target_os = "linux")]
 use idmap::{GidMap, IdMapSetUpPipeMessage, UidMap};
 use std::ffi::CString;
-use std::fs::{self, File};
+#[cfg(target_os = "linux")]
+use std::fs;
+use std::fs::File;
 #[cfg(target_os = "linux")]
 use std::io::{Read, Write};
 #[cfg(target_os = "linux")]
 use std::os::fd::OwnedFd;
+#[cfg(target_os = "linux")]
 use std::os::unix::io::{AsRawFd, FromRawFd};
+#[cfg(target_os = "linux")]
 use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::process::{self, Command};

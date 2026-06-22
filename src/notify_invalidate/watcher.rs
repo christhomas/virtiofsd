@@ -26,7 +26,9 @@
 use std::convert::TryFrom;
 use std::fmt;
 use std::io;
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::mpsc;
 
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -41,6 +43,7 @@ const EVENT_CHANNEL_SIZE: usize = 4096;
 
 /// Soft warning threshold for inotify watch count. Above this we log a hint
 /// to bump `fs.inotify.max_user_watches`. The default kernel value is 8192.
+#[cfg(target_os = "linux")]
 const INOTIFY_WATCH_WARN_THRESHOLD: usize = 8000;
 
 /// A normalized event from the host filesystem.

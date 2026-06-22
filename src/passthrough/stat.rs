@@ -17,6 +17,7 @@ use crate::oslib;
 #[cfg(target_os = "linux")]
 use file_status::{statx_st, STATX_BASIC_STATS, STATX_MNT_ID};
 
+#[cfg(target_os = "linux")]
 const EMPTY_CSTR: &[u8] = b"\0";
 
 pub type MountId = u64;

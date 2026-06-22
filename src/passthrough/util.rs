@@ -26,11 +26,8 @@ pub fn translate_linux_open_flags(linux_flags: i32) -> i32 {
     const LINUX_O_APPEND: i32 = 0o2000;
     const LINUX_O_NONBLOCK: i32 = 0o4000;
     const LINUX_O_DSYNC: i32 = 0o10000;
-    const LINUX_O_DIRECT: i32 = 0o40000;
-    const LINUX_O_LARGEFILE: i32 = 0o100000;
     const LINUX_O_DIRECTORY: i32 = 0o200000;
     const LINUX_O_NOFOLLOW: i32 = 0o400000;
-    const LINUX_O_NOATIME: i32 = 0o1000000;
     const LINUX_O_CLOEXEC: i32 = 0o2000000;
     const LINUX_O_SYNC: i32 = 0o4010000;
 
@@ -331,7 +328,8 @@ pub(crate) enum FdPathError {
     /// `readlinkat()` failed with the contained error.
     ReadLink(io::Error),
 
-    /// Link name is too long.
+    /// Link name is too long. Only produced on Linux (via `/proc/self/fd`).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     TooLong,
 
     /// Link name is not a valid C string.
@@ -341,6 +339,7 @@ pub(crate) enum FdPathError {
     NotAFile(String),
 
     /// Returned path (contained string) is reported to be deleted, i.e. no longer valid.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Deleted(String),
 }
 
@@ -668,7 +667,6 @@ mod tests {
     #[cfg(target_os = "macos")]
     mod macos_symlink_open {
         use std::ffi::CString;
-        use std::io::Write;
         use std::os::unix::io::AsRawFd;
         use std::path::Path;
 

@@ -4,6 +4,7 @@
 
 use log::*;
 use passthrough::xattrmap::XattrMap;
+#[cfg(target_os = "linux")]
 use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::ffi::CString;
@@ -29,7 +30,9 @@ use virtiofsd::passthrough::{
     self, CachePolicy, InodeFileHandlesMode, MigrationMode, MigrationOnError, PassthroughFs,
 };
 use virtiofsd::sandbox::{Sandbox, SandboxMode};
-use virtiofsd::seccomp::{enable_seccomp, SeccompAction};
+#[cfg(target_os = "linux")]
+use virtiofsd::seccomp::enable_seccomp;
+use virtiofsd::seccomp::SeccompAction;
 use virtiofsd::util::write_pid_file;
 use virtiofsd::vhost_user::{Error, VhostUserFsBackendBuilder, MAX_TAG_LEN};
 use virtiofsd::{limits, oslib, soft_idmap};

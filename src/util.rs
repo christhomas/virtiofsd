@@ -5,7 +5,9 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Error, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::os::unix::io::AsRawFd;
+#[cfg(target_os = "linux")]
+use std::os::unix::io::FromRawFd;
 use std::path::Path;
 use std::{fs, io, process};
 
