@@ -1595,9 +1595,13 @@ impl FileSystem for PassthroughFs {
         } else {
             FsOptions::empty()
         };
-        if self.cfg.writeback && capable.contains(FsOptions::WRITEBACK_CACHE) {
-            opts |= FsOptions::WRITEBACK_CACHE;
-            self.writeback.store(true, Ordering::Relaxed);
+        if self.cfg.writeback {
+            if capable.contains(FsOptions::WRITEBACK_CACHE) {
+                opts |= FsOptions::WRITEBACK_CACHE;
+                self.writeback.store(true, Ordering::Relaxed);
+            } else {
+                warn!("Cannot enable writeback cache, client does not support it");
+            }
         }
         if self.cfg.announce_submounts {
             if capable.contains(FsOptions::SUBMOUNTS) {
