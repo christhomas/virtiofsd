@@ -1603,7 +1603,7 @@ impl FileSystem for PassthroughFs {
             if capable.contains(FsOptions::SUBMOUNTS) {
                 self.announce_submounts.store(true, Ordering::Relaxed);
             } else {
-                eprintln!("Warning: Cannot announce submounts, client does not support it");
+                warn!("Cannot announce submounts, client does not support it");
             }
         }
         if self.cfg.killpriv_v2 {
