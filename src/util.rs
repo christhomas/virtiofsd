@@ -22,7 +22,7 @@ fn try_lock_file(file: &File) -> Result<(), Error> {
 pub fn write_pid_file(pid_file_name: &Path) -> Result<File, std::io::Error> {
     let mut pid_file = loop {
         let file = OpenOptions::new()
-            .mode(libc::S_IRUSR | libc::S_IWUSR)
+            .mode((libc::S_IRUSR | libc::S_IWUSR) as u32)
             .custom_flags(libc::O_CLOEXEC)
             .write(true)
             .create(true)
@@ -49,12 +49,14 @@ pub fn write_pid_file(pid_file_name: &Path) -> Result<File, std::io::Error> {
     Ok(pid_file)
 }
 
+#[cfg(target_os = "linux")]
 unsafe fn pidfd_open(pid: libc::pid_t, flags: libc::c_uint) -> libc::c_int {
     libc::syscall(libc::SYS_pidfd_open, pid, flags) as libc::c_int
 }
 
 /// Helper function to create a process and sets the parent process
 /// death signal SIGTERM
+#[cfg(target_os = "linux")]
 pub fn sfork() -> io::Result<i32> {
     let cur_pid = unsafe { libc::getpid() };
 
@@ -104,6 +106,20 @@ pub fn sfork() -> io::Result<i32> {
     Ok(child_pid)
 }
 
+/// macOS: fork() without PR_SET_PDEATHSIG or pidfd_open (neither are available).
+// TODO(macos): There is no direct equivalent to PR_SET_PDEATHSIG on macOS.
+// The child process will not be notified if the parent dies. Consider using
+// kqueue with EVFILT_PROC/NOTE_EXIT on the parent PID as a workaround.
+#[cfg(target_os = "macos")]
+pub fn sfork() -> io::Result<i32> {
+    let child_pid = unsafe { libc::fork() };
+    if child_pid == -1 {
+        return Err(Error::last_os_error());
+    }
+    Ok(child_pid)
+}
+
+#[cfg(target_os = "linux")]
 pub fn wait_for_child(pid: i32) -> ! {
     // Drop all capabilities, since the parent doesn't require any
     // capabilities, as it'd be just waiting for the child to exit.
@@ -134,6 +150,29 @@ pub fn wait_for_child(pid: i32) -> ! {
     process::exit(exit_code);
 }
 
+/// macOS: wait_for_child without capability dropping (capng not available).
+#[cfg(target_os = "macos")]
+pub fn wait_for_child(pid: i32) -> ! {
+    let mut status = 0;
+    if unsafe { libc::waitpid(pid, &mut status, 0) } != pid {
+        error!("Error during waitpid()");
+        process::exit(1);
+    }
+
+    let exit_code = if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else if libc::WIFSIGNALED(status) {
+        let signal = libc::WTERMSIG(status);
+        error!("Child process terminated by signal {signal}");
+        -signal
+    } else {
+        error!("Unexpected waitpid status: {status:#X}");
+        libc::EXIT_FAILURE
+    };
+
+    process::exit(exit_code);
+}
+
 /// Add a capability to the effective set
 /// # Errors
 /// An error variant will be returned:
@@ -143,6 +182,7 @@ pub fn wait_for_child(pid: i32) -> ! {
 /// - if `capng::update()` fails to update the internal posix capabilities settings.
 /// - if `capng::apply()` fails to transfer the specified internal posix capabilities settings to
 ///   the kernel.
+#[cfg(target_os = "linux")]
 pub fn add_cap_to_eff(cap_name: &str) -> capng::Result<()> {
     use capng::{Action, CUpdate, Set, Type};
     let cap = capng::name_to_capability(cap_name)?;
@@ -157,6 +197,13 @@ pub fn add_cap_to_eff(cap_name: &str) -> capng::Result<()> {
     capng::update(req)?;
     capng::apply(Set::CAPS)?;
 
+    Ok(())
+}
+
+/// macOS: Capabilities are not available. This is a no-op.
+#[cfg(target_os = "macos")]
+pub fn add_cap_to_eff(_cap_name: &str) -> std::result::Result<(), String> {
+    // No capabilities on macOS
     Ok(())
 }
 

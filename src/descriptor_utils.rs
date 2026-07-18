@@ -14,8 +14,8 @@ use vhost_user_backend::bitmap::BitmapMmapRegion;
 use virtio_queue::DescriptorChain;
 use vm_memory::bitmap::{Bitmap, BitmapSlice};
 use vm_memory::{
-    Address, ByteValued, GuestMemory, GuestMemoryError, GuestMemoryMmap, GuestMemoryRegion,
-    VolatileMemory, VolatileMemoryError, VolatileSlice,
+    Address, ByteValued, GuestMemory, GuestMemoryBackend, GuestMemoryError, GuestMemoryMmap,
+    GuestMemoryRegion, VolatileMemory, VolatileMemoryError, VolatileSlice,
 };
 
 use crate::file_traits::FileReadWriteAtVolatile;

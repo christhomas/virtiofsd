@@ -9,6 +9,9 @@
 //! [`FileSystem`] and [`SerializableFileSystem`] traits, so can be used as a virtiofsd filesystem
 //! driver.
 
+#[cfg(target_os = "macos")]
+use crate::libc_compat as libc;
+
 use super::util::{einval, erofs};
 use super::PassthroughFs;
 use crate::filesystem::{
@@ -39,6 +42,15 @@ impl PassthroughFsRo {
         Ok(PassthroughFsRo(inner))
     }
 
+    /// Forward to the inner filesystem so callers can opt-in to push-based
+    /// cache invalidation even on read-only mounts (the host can still
+    /// modify the underlying tree out-of-band).
+    pub fn enable_dentry_index(
+        &mut self,
+    ) -> std::sync::Arc<crate::passthrough::dentry_index::DentryIndex> {
+        self.0.enable_dentry_index()
+    }
+
     /// Internal: Run an `open()`-like function without allowing modifications or write access.
     ///
     /// That means:
@@ -59,7 +71,11 @@ impl PassthroughFsRo {
 
         // `O_PATH` ignores all flags but `O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW`, just allow it
         // wholesale
-        if cflags & libc::O_PATH != 0 {
+        #[cfg(target_os = "linux")]
+        let o_path = libc::O_PATH;
+        #[cfg(target_os = "macos")]
+        let o_path = libc::O_RDONLY; // O_PATH not available on macOS
+        if cflags & o_path != 0 {
             return open_fn(flags);
         }
 

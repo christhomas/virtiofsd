@@ -2,10 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#[cfg(target_os = "linux")]
 use libseccomp_sys::{
     seccomp_init, seccomp_load, seccomp_release, seccomp_rule_add, SCMP_ACT_ALLOW,
     SCMP_ACT_KILL_PROCESS, SCMP_ACT_LOG, SCMP_ACT_TRAP,
 };
+#[cfg(target_os = "linux")]
 use std::convert::TryInto;
 use std::{error, fmt};
 
@@ -37,6 +39,7 @@ pub enum SeccompAction {
     Trap,
 }
 
+#[cfg(target_os = "linux")]
 impl From<SeccompAction> for u32 {
     fn from(action: SeccompAction) -> u32 {
         match action {
@@ -48,6 +51,7 @@ impl From<SeccompAction> for u32 {
     }
 }
 
+#[cfg(target_os = "linux")]
 macro_rules! allow_syscall {
     ($ctx:ident, $syscall:expr) => {
         let syscall_nr: i32 = $syscall.try_into().unwrap();
@@ -58,6 +62,7 @@ macro_rules! allow_syscall {
     };
 }
 
+#[cfg(target_os = "linux")]
 pub fn enable_seccomp(action: SeccompAction, allow_remote_logging: bool) -> Result<(), Error> {
     let ctx = unsafe { seccomp_init(action.into()) };
     if ctx.is_null() {
@@ -217,5 +222,12 @@ pub fn enable_seccomp(action: SeccompAction, allow_remote_logging: bool) -> Resu
 
     unsafe { seccomp_release(ctx) };
 
+    Ok(())
+}
+
+/// macOS: seccomp is not available, this is a no-op stub.
+#[cfg(target_os = "macos")]
+pub fn enable_seccomp(_action: SeccompAction, _allow_remote_logging: bool) -> Result<(), Error> {
+    // seccomp is Linux-specific; on macOS we simply do nothing.
     Ok(())
 }

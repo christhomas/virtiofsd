@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#[cfg(target_os = "macos")]
+use crate::libc_compat as libc;
+
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::sync::atomic::AtomicBool;

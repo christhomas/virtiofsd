@@ -2,14 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#[cfg(target_os = "macos")]
+use crate::idmap::{GidMap, UidMap};
+#[cfg(target_os = "linux")]
 use crate::{idmap, oslib, passthrough, util};
+#[cfg(target_os = "linux")]
 use idmap::{GidMap, IdMapSetUpPipeMessage, UidMap};
 use std::ffi::CString;
 use std::fs::{self, File};
+#[cfg(target_os = "linux")]
 use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
 use std::os::fd::OwnedFd;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::Path;
+#[cfg(target_os = "linux")]
 use std::process::{self, Command};
 use std::str::FromStr;
 use std::{error, fmt, io};
@@ -190,6 +197,7 @@ impl Sandbox {
     // descriptor obtained for `/proc/self/fd`.
     //
     // It's ugly, but it's the only way until Linux implements a proper containerization API.
+    #[cfg(target_os = "linux")]
     fn setup_mounts(&mut self) -> Result<(), Error> {
         // Open an FD to `/proc/self` so we can later open `/proc/self/mountinfo`.
         // (If we opened `/proc/self/mountinfo` now, it would appear empty by the end of this
@@ -318,6 +326,7 @@ impl Sandbox {
     }
 
     /// Sets mappings for the given uid and gid.
+    #[cfg(target_os = "linux")]
     fn setup_id_mappings(
         &self,
         uid_map: &[UidMap],
@@ -415,6 +424,7 @@ impl Sandbox {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
     pub fn enter_namespace(&mut self, listener: Listener) -> Result<Listener, Error> {
         let uid = unsafe { libc::geteuid() };
 
@@ -533,6 +543,16 @@ impl Sandbox {
         }
     }
 
+    /// macOS: Namespaces are not available. Return an error.
+    #[cfg(target_os = "macos")]
+    pub fn enter_namespace(&mut self, _listener: Listener) -> Result<Listener, Error> {
+        Err(Error::Unshare(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Namespace sandboxing is not available on macOS",
+        )))
+    }
+
+    #[cfg(target_os = "linux")]
     pub fn enter_chroot(&mut self) -> Result<(), Error> {
         let c_proc_self_fd = CString::new("/proc/self/fd").unwrap();
         let proc_self_fd = unsafe { libc::open(c_proc_self_fd.as_ptr(), libc::O_PATH) };
@@ -565,6 +585,29 @@ impl Sandbox {
         Ok(())
     }
 
+    /// macOS: chroot-based sandbox. /proc/self/fd and mountinfo are not available,
+    /// so we leave those as None (callers must handle this).
+    // TODO(macos): Without proc_self_fd, path resolution for FDs will rely on
+    // fcntl(F_GETPATH) instead. mountinfo is not available on macOS at all.
+    #[cfg(target_os = "macos")]
+    pub fn enter_chroot(&mut self) -> Result<(), Error> {
+        let c_shared_dir = CString::new(self.shared_dir.clone()).unwrap();
+        let ret = unsafe { libc::chroot(c_shared_dir.as_ptr()) };
+        if ret != 0 {
+            return Err(Error::Chroot(std::io::Error::last_os_error()));
+        }
+
+        let c_root_dir = CString::new("/").unwrap();
+        let ret = unsafe { libc::chdir(c_root_dir.as_ptr()) };
+        if ret != 0 {
+            return Err(Error::ChrootChdir(std::io::Error::last_os_error()));
+        }
+
+        // proc_self_fd and mountinfo_fd remain None on macOS
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
     fn must_drop_supplemental_groups(&self) -> Result<bool, Error> {
         let uid = unsafe { libc::geteuid() };
         if uid != 0 {
@@ -594,6 +637,13 @@ impl Sandbox {
         let single_gid_mapping = gid_map.len() == 3 && gid_map[2] == "1";
 
         Ok(setgroups.trim() != "deny" || !single_uid_mapping || !single_gid_mapping)
+    }
+
+    /// macOS: No user namespaces, so if running as root, always drop supplemental groups.
+    #[cfg(target_os = "macos")]
+    fn must_drop_supplemental_groups(&self) -> Result<bool, Error> {
+        let uid = unsafe { libc::geteuid() };
+        Ok(uid == 0)
     }
 
     fn drop_supplemental_groups(&self) -> Result<(), Error> {
@@ -674,6 +724,7 @@ impl Sandbox {
 
     /// Return the prefix to strip from /proc/self/mountinfo entries to get paths that are actually
     /// accessible in our sandbox
+    #[cfg(target_os = "linux")]
     pub fn get_mountinfo_prefix(&self) -> io::Result<Option<String>> {
         match self.sandbox_mode {
             SandboxMode::Namespace | SandboxMode::None => Ok(None),
@@ -685,5 +736,11 @@ impl Sandbox {
                 Ok(Some(prefix))
             }
         }
+    }
+
+    /// macOS: mountinfo is not available, so always return None.
+    #[cfg(target_os = "macos")]
+    pub fn get_mountinfo_prefix(&self) -> io::Result<Option<String>> {
+        Ok(None)
     }
 }

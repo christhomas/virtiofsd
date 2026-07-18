@@ -17,6 +17,14 @@ use std::sync::Arc;
 
 const EMPTY_CSTR: &[u8] = b"\0";
 
+/// macOS does not define AT_EMPTY_PATH. We define a compat constant here.
+/// Since name_to_handle_at returns ENOSYS on macOS, this value is never
+/// actually passed to a syscall; it just needs to compile.
+#[cfg(target_os = "macos")]
+const AT_EMPTY_PATH: libc::c_int = 0x1000;
+#[cfg(not(target_os = "macos"))]
+const AT_EMPTY_PATH: libc::c_int = libc::AT_EMPTY_PATH;
+
 #[derive(Clone, PartialOrd, Ord, PartialEq, Eq)]
 pub struct FileHandle {
     mnt_id: MountId,
@@ -50,7 +58,7 @@ impl FileHandle {
         let mut mount_id: libc::c_int = 0;
         let mut c_fh = oslib::CFileHandle::default();
 
-        oslib::name_to_handle_at(dir, path, &mut c_fh, &mut mount_id, libc::AT_EMPTY_PATH)?;
+        oslib::name_to_handle_at(dir, path, &mut c_fh, &mut mount_id, AT_EMPTY_PATH)?;
         Ok(FileHandle {
             mnt_id: mount_id as MountId,
             handle: c_fh,

@@ -46,6 +46,67 @@ The debug binary is built only for x86\_64 Linux-based systems.
 [Click here to download the latest build](
 https://gitlab.com/virtio-fs/virtiofsd/-/jobs/artifacts/main/download?job=publish)
 
+## Cache coherency
+
+virtiofsd's cache coherency model is normally pull-based: the guest decides
+when to revalidate cached attributes/dentries based on the TTL implied by
+`--cache=auto` (~1 second) or by always going to the daemon (`--cache=never`).
+This forces a tradeoff between freshness (host edits visible to the guest
+within ~100 ms) and throughput (page cache and `mmap(MAP_SHARED|PROT_WRITE)`
+work properly on guest kernels older than 6.7).
+
+The `--notify-invalidate` flag adds a complementary push path: the daemon
+watches the shared directory tree on the host (inotify on Linux, FSEvents on
+macOS) and emits FUSE invalidation messages so the guest drops its caches as
+soon as the host changes a file.
+
+```
+virtiofsd --shared-dir /srv/share --socket-path /tmp/v.sock --notify-invalidate
+```
+
+### Behaviour
+
+| Event on the host | Notification sent to the guest |
+| ----------------- | ------------------------------- |
+| File modified     | `FUSE_NOTIFY_INVAL_INODE` for the leaf |
+| File created      | `FUSE_NOTIFY_INVAL_ENTRY` for the parent dir |
+| File removed      | `FUSE_NOTIFY_INVAL_ENTRY` for the parent dir, plus `INVAL_INODE` for the leaf if cached |
+| File renamed      | `FUSE_NOTIFY_INVAL_ENTRY` for both old and new parent dirs, plus `INVAL_INODE` for the renamed leaf if cached |
+
+### Trade-offs and limits
+
+* **Best-effort, not a guarantee.** Both inotify and FSEvents drop events
+  under heavy churn (e.g. a `git checkout` of a branch with thousands of
+  changed files). When the daemon detects an overflow it falls back to
+  invalidating every inode it currently has cached — the guest will briefly
+  serve stale data between the overflow and the bulk-invalidate landing.
+* **TTL still required.** Push invalidation is a fast path on top of the TTL
+  backstop, not a replacement for it. Do not bump the cache TTL on the
+  assumption that push always works; missed events fall back to TTL-driven
+  revalidation.
+* **Linux watch limit.** Recursive inotify allocates one watch per
+  directory; large trees can exceed `fs.inotify.max_user_watches` (default
+  8192). The daemon logs a warning at startup when this is likely.
+* **Symlinks.** Only the literal `--shared-dir` is watched; symlinks within
+  it are not followed by the watcher (events under the symlink target's real
+  path are not seen).
+* **Startup gap.** Events that occur between daemon launch and watcher
+  subscription are lost. The pipeline issues a single bulk invalidate when
+  it comes up to cover that window.
+
+### Guest requirement
+
+The guest kernel must negotiate `VIRTIO_FS_F_NOTIFICATION` (added in Linux
+6.6) for these messages to take effect. On older guests the daemon detects
+the missing feature negotiation and the host-side watcher runs but no
+notifications are placed on the queue (the `Notifier` returns
+`QueueNotNegotiated`).
+
+When the flag is enabled the daemon advertises three virtqueues
+(`hiprio`, `notification`, `request`) instead of two; QEMU and the guest
+kernel pick this up automatically when both sides understand
+`VIRTIO_FS_F_NOTIFICATION`.
+
 ## Contributing
 See [CONTRIBUTING.md](CONTRIBUTING.md)
 

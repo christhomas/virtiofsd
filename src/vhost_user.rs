@@ -2,6 +2,9 @@
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
+#[cfg(target_os = "macos")]
+use crate::libc_compat as libc;
+
 use std::convert::TryInto;
 use std::fs::File;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,6 +18,7 @@ use log::*;
 use vhost::vhost_user::message::*;
 use vhost::vhost_user::Backend;
 use vhost_user_backend::bitmap::BitmapMmapRegion;
+use vhost_user_backend::EventSet;
 use vhost_user_backend::{VhostUserBackend, VringMutex, VringState, VringT};
 use virtio_bindings::bindings::virtio_config::*;
 use virtio_bindings::bindings::virtio_ring::{
@@ -24,13 +28,13 @@ use virtio_queue::{DescriptorChain, QueueOwnedT};
 use vm_memory::{
     ByteValued, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard, GuestMemoryMmap, Le32,
 };
-use vmm_sys_util::epoll::EventSet;
 use vmm_sys_util::event::{
     new_event_consumer_and_notifier, EventConsumer, EventFlag, EventNotifier,
 };
 
 use crate::descriptor_utils::{Error as VufDescriptorError, Reader, Writer};
 use crate::filesystem::{FileSystem, SerializableFileSystem};
+use crate::notify_invalidate::notifier::{Notification, Notifier, NotifierError};
 use crate::server::Server;
 use crate::util::other_io_error;
 use crate::Error as VhostUserFsError;
@@ -41,15 +45,27 @@ type LoggedMemoryAtomic = GuestMemoryAtomic<LoggedMemory>;
 const QUEUE_SIZE: usize = 32768;
 // The spec allows for multiple request queues. We currently only support one.
 const REQUEST_QUEUES: u32 = 1;
-// In addition to the request queue there is one high-prio queue.
-// Since VIRTIO_FS_F_NOTIFICATION is not advertised we do not have a
-// notification queue.
-const NUM_QUEUES: usize = REQUEST_QUEUES as usize + 1;
+// Queue layout:
+//   * Without VIRTIO_FS_F_NOTIFICATION (default): [hiprio, request] = 2 queues.
+//   * With    VIRTIO_FS_F_NOTIFICATION (--notify-invalidate): [hiprio, notif, request] = 3 queues.
+// The notification queue must be slot 1 to match the virtio-fs spec
+// (virtio v1.2 §5.11.2): hiprio=0, notification=1 (when negotiated),
+// request=2..N.
+const NUM_QUEUES_BASE: usize = REQUEST_QUEUES as usize + 1;
+const NUM_QUEUES_WITH_NOTIF: usize = REQUEST_QUEUES as usize + 2;
+
+/// virtio-fs feature bit for the notification queue. From the virtio v1.2
+/// spec §5.11.3 (`VIRTIO_FS_F_NOTIFICATION` = bit 0).
+const VIRTIO_FS_F_NOTIFICATION: u64 = 1 << 0;
 
 // The guest queued an available buffer for the high priority queue.
-const HIPRIO_QUEUE_EVENT: u16 = 0;
-// The guest queued an available buffer for the request queue.
-const REQ_QUEUE_EVENT: u16 = 1;
+const HIPRIO_QUEUE_EVENT: usize = 0;
+// The guest queued an available buffer for the request queue (when the
+// notification feature is *not* negotiated).
+const REQ_QUEUE_EVENT_NO_NOTIF: usize = 1;
+// With the notification feature negotiated, the queue indices shift:
+const NOTIF_QUEUE_EVENT: usize = 1;
+const REQ_QUEUE_EVENT_WITH_NOTIF: usize = 2;
 
 /// The maximum length of the tag being used.
 pub const MAX_TAG_LEN: usize = 36;
@@ -117,6 +133,120 @@ impl convert::From<Error> for io::Error {
     }
 }
 
+/// Shared state behind the [`Notifier`] handed out to the watcher thread.
+///
+/// The watcher pipeline starts up before the guest connects, so the vring and
+/// memory references are filled in lazily — the first time the daemon
+/// receives a NOTIF_QUEUE_EVENT for the notification queue we cache them
+/// here. Until then, [`NotifierState::send`] returns
+/// [`NotifierError::QueueNotNegotiated`].
+///
+/// `event_idx` mirrors the per-thread flag of the same name; the notifier
+/// reads it on each send to decide whether to honour the guest's
+/// `needs_notification` hint or fall back to unconditional signalling.
+struct NotifierState {
+    /// True iff `--notify-invalidate` was set on the daemon. When false, the
+    /// backend never advertises VIRTIO_FS_F_NOTIFICATION and `send` always
+    /// returns `QueueNotNegotiated`.
+    enabled: bool,
+    vring: Mutex<Option<VringMutex<LoggedMemoryAtomic>>>,
+    mem: Mutex<Option<LoggedMemoryAtomic>>,
+    event_idx: AtomicBool,
+}
+
+impl NotifierState {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            vring: Mutex::new(None),
+            mem: Mutex::new(None),
+            event_idx: AtomicBool::new(false),
+        }
+    }
+
+    fn set_event_idx(&self, enabled: bool) {
+        self.event_idx.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Cache the vring + memory the first time the notification queue is
+    /// kicked. Cheap to call repeatedly.
+    fn install(&self, vring: VringMutex<LoggedMemoryAtomic>, mem: LoggedMemoryAtomic) {
+        let mut v = self.vring.lock().unwrap();
+        if v.is_none() {
+            *v = Some(vring);
+        }
+        let mut m = self.mem.lock().unwrap();
+        if m.is_none() {
+            *m = Some(mem);
+        }
+    }
+}
+
+impl Notifier for NotifierState {
+    fn send(&self, notification: Notification) -> std::result::Result<(), NotifierError> {
+        use std::io::Write as _;
+
+        if !self.enabled {
+            return Err(NotifierError::QueueNotNegotiated);
+        }
+        let vring_lock = self.vring.lock().unwrap();
+        let mem_lock = self.mem.lock().unwrap();
+        let (vring, mem) = match (vring_lock.as_ref(), mem_lock.as_ref()) {
+            (Some(v), Some(m)) => (v, m),
+            _ => return Err(NotifierError::QueueNotNegotiated),
+        };
+
+        let bytes = notification.encode();
+        let guard = mem.memory();
+
+        // Pop one available descriptor chain off the notification queue.
+        let mut state = vring.get_mut();
+        let chain = state
+            .get_queue_mut()
+            .iter(guard.clone())
+            .map_err(|_| NotifierError::QueueFull)?
+            .next()
+            .ok_or(NotifierError::QueueFull)?;
+        let head_index = chain.head_index();
+
+        let mut writer = Writer::new(&guard, chain.clone()).map_err(|e| {
+            NotifierError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("creating notification writer: {e:?}"),
+            ))
+        })?;
+
+        let needed = bytes.len();
+        let have = writer.available_bytes();
+        if have < needed {
+            // Don't return the descriptor as used: a buffer that small is a
+            // guest-side bug we can't make progress on. Re-queue is awkward
+            // (vhost-user-backend doesn't expose desc-rewind), so for now we
+            // mark used with len=0 and surface the error.
+            let _ = state.add_used(head_index, 0);
+            return Err(NotifierError::BufferTooSmall { needed, have });
+        }
+
+        writer.write_all(&bytes).map_err(NotifierError::Io)?;
+        state
+            .add_used(head_index, needed as u32)
+            .map_err(|e| NotifierError::Io(other_io_error(format!("add_used: {e:?}"))))?;
+
+        // Signal — honour event-idx if negotiated, otherwise unconditionally.
+        let must_signal = if self.event_idx.load(Ordering::Relaxed) {
+            state.needs_notification().unwrap_or(true)
+        } else {
+            true
+        };
+        drop(state);
+        if must_signal {
+            // ignore errors: the vring may be torn down concurrently
+            let _ = vring.signal_used_queue();
+        }
+        Ok(())
+    }
+}
+
 struct VhostUserFsThread<F: FileSystem + Send + Sync + 'static> {
     mem: Option<LoggedMemoryAtomic>,
     server: Arc<Server<F>>,
@@ -124,10 +254,11 @@ struct VhostUserFsThread<F: FileSystem + Send + Sync + 'static> {
     vu_req: Option<Backend>,
     event_idx: bool,
     pool: Option<ThreadPool>,
+    notifier_state: Arc<NotifierState>,
 }
 
 impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFsThread<F> {
-    fn new(fs: F, thread_pool_size: usize) -> Result<Self> {
+    fn new(fs: F, thread_pool_size: usize, notifier_state: Arc<NotifierState>) -> Result<Self> {
         let pool = if thread_pool_size > 0 {
             // Test that unshare(CLONE_FS) works, it will be called for each thread.
             // It's an unprivileged system call but some Docker/Moby versions are
@@ -161,6 +292,7 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
             vu_req: None,
             event_idx: false,
             pool,
+            notifier_state,
         })
     }
 
@@ -287,17 +419,40 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
 
     fn handle_event_pool(
         &self,
-        device_event: u16,
+        device_event: usize,
         vrings: &[VringMutex<LoggedMemoryAtomic>],
     ) -> io::Result<()> {
+        let notif_enabled = self.notifier_state.enabled;
+        let req_event = if notif_enabled {
+            REQ_QUEUE_EVENT_WITH_NOTIF
+        } else {
+            REQ_QUEUE_EVENT_NO_NOTIF
+        };
+
+        // Notification queue: stash the vring + memory so the watcher
+        // thread's notifier can write into it. We do not iterate the
+        // descriptors here — `NotifierState::send` claims one per
+        // outbound notification on demand.
+        if notif_enabled && device_event == NOTIF_QUEUE_EVENT {
+            debug!("NOTIF_QUEUE_EVENT");
+            if let Some(mem) = self.mem.as_ref() {
+                self.notifier_state.install(vrings[1].clone(), mem.clone());
+            }
+            return Ok(());
+        }
+
         let idx = match device_event {
             HIPRIO_QUEUE_EVENT => {
                 debug!("HIPRIO_QUEUE_EVENT");
                 0
             }
-            REQ_QUEUE_EVENT => {
+            e if e == req_event => {
                 debug!("QUEUE_EVENT");
-                1
+                if notif_enabled {
+                    2
+                } else {
+                    1
+                }
             }
             _ => return Err(Error::HandleEventUnknownEvent.into()),
         };
@@ -327,17 +482,33 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFs
 
     fn handle_event_serial(
         &self,
-        device_event: u16,
+        device_event: usize,
         vrings: &[VringMutex<LoggedMemoryAtomic>],
     ) -> io::Result<()> {
+        let notif_enabled = self.notifier_state.enabled;
+        let req_event = if notif_enabled {
+            REQ_QUEUE_EVENT_WITH_NOTIF
+        } else {
+            REQ_QUEUE_EVENT_NO_NOTIF
+        };
+
+        if notif_enabled && device_event == NOTIF_QUEUE_EVENT {
+            debug!("NOTIF_QUEUE_EVENT");
+            if let Some(mem) = self.mem.as_ref() {
+                self.notifier_state.install(vrings[1].clone(), mem.clone());
+            }
+            return Ok(());
+        }
+
         let mut vring_state = match device_event {
             HIPRIO_QUEUE_EVENT => {
                 debug!("HIPRIO_QUEUE_EVENT");
                 vrings[0].get_mut()
             }
-            REQ_QUEUE_EVENT => {
+            e if e == req_event => {
                 debug!("QUEUE_EVENT");
-                vrings[1].get_mut()
+                let req_idx = if notif_enabled { 2 } else { 1 };
+                vrings[req_idx].get_mut()
             }
             _ => return Err(Error::HandleEventUnknownEvent.into()),
         };
@@ -396,6 +567,7 @@ struct PremigrationThread {
 pub struct VhostUserFsBackendBuilder {
     thread_pool_size: usize,
     tag: Option<String>,
+    notify_invalidate: bool,
 }
 
 impl VhostUserFsBackendBuilder {
@@ -415,17 +587,33 @@ impl VhostUserFsBackendBuilder {
         self
     }
 
+    /// Enable advertising of `VIRTIO_FS_F_NOTIFICATION` and the dedicated
+    /// notification virtqueue. When enabled, the backend exposes a
+    /// [`Notifier`] handle via [`VhostUserFsBackend::notifier`] that writes
+    /// FUSE notification frames into the queue.
+    pub fn set_notify_invalidate(mut self, enabled: bool) -> Self {
+        self.notify_invalidate = enabled;
+        self
+    }
+
     /// Build the [`VhostUserFsBackend`] object.
     pub fn build<F>(self, fs: F) -> Result<VhostUserFsBackend<F>>
     where
         F: FileSystem + SerializableFileSystem + Send + Sync + 'static,
     {
-        let thread = RwLock::new(VhostUserFsThread::new(fs, self.thread_pool_size)?);
+        let notifier_state = Arc::new(NotifierState::new(self.notify_invalidate));
+        let thread = RwLock::new(VhostUserFsThread::new(
+            fs,
+            self.thread_pool_size,
+            Arc::clone(&notifier_state),
+        )?);
         Ok(VhostUserFsBackend {
             thread,
             premigration_thread: None.into(),
             migration_thread: None.into(),
             tag: self.tag,
+            notify_invalidate: self.notify_invalidate,
+            notifier_state,
         })
     }
 }
@@ -435,6 +623,19 @@ pub struct VhostUserFsBackend<F: FileSystem + SerializableFileSystem + Send + Sy
     premigration_thread: Mutex<Option<PremigrationThread>>,
     migration_thread: Mutex<Option<JoinHandle<io::Result<()>>>>,
     tag: Option<String>,
+    notify_invalidate: bool,
+    notifier_state: Arc<NotifierState>,
+}
+
+impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFsBackend<F> {
+    /// Returns a [`Notifier`] handle suitable for handing to the
+    /// `notify_invalidate` watcher pipeline. The handle is valid even before
+    /// the guest has connected — calls to `send` simply return
+    /// `QueueNotNegotiated` until the guest provides buffers on the
+    /// notification queue.
+    pub fn notifier(&self) -> Arc<dyn Notifier> {
+        Arc::clone(&self.notifier_state) as Arc<dyn Notifier>
+    }
 }
 
 impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserFsBackend<F> {
@@ -454,7 +655,11 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserBa
     type Vring = VringMutex<LoggedMemoryAtomic>;
 
     fn num_queues(&self) -> usize {
-        NUM_QUEUES
+        if self.notify_invalidate {
+            NUM_QUEUES_WITH_NOTIF
+        } else {
+            NUM_QUEUES_BASE
+        }
     }
 
     fn max_queue_size(&self) -> usize {
@@ -462,11 +667,16 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserBa
     }
 
     fn features(&self) -> u64 {
-        (1 << VIRTIO_F_VERSION_1)
+        let base = (1 << VIRTIO_F_VERSION_1)
             | (1 << VIRTIO_RING_F_INDIRECT_DESC)
             | (1 << VIRTIO_RING_F_EVENT_IDX)
             | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
-            | VhostUserVirtioFeatures::LOG_ALL.bits()
+            | VhostUserVirtioFeatures::LOG_ALL.bits();
+        if self.notify_invalidate {
+            base | VIRTIO_FS_F_NOTIFICATION
+        } else {
+            base
+        }
     }
 
     fn protocol_features(&self) -> VhostUserProtocolFeatures {
@@ -555,21 +765,27 @@ impl<F: FileSystem + SerializableFileSystem + Send + Sync + 'static> VhostUserBa
 
     fn set_event_idx(&self, enabled: bool) {
         self.thread.write().unwrap().event_idx = enabled;
+        self.notifier_state.set_event_idx(enabled);
     }
 
     fn update_memory(&self, mem: LoggedMemoryAtomic) -> io::Result<()> {
-        self.thread.write().unwrap().mem = Some(mem);
+        self.thread.write().unwrap().mem = Some(mem.clone());
+        // Refresh the notifier's memory snapshot too — the guest may have
+        // remapped memory since the last NOTIF_QUEUE_EVENT.
+        if self.notify_invalidate {
+            *self.notifier_state.mem.lock().unwrap() = Some(mem);
+        }
         Ok(())
     }
 
     fn handle_event(
         &self,
-        device_event: u16,
+        device_event: usize,
         evset: EventSet,
         vrings: &[VringMutex<LoggedMemoryAtomic>],
         _thread_id: usize,
     ) -> io::Result<()> {
-        if evset != EventSet::IN {
+        if !matches!(evset, EventSet::Readable | EventSet::All) {
             return Err(Error::HandleEventNotEpollIn.into());
         }
 

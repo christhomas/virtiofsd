@@ -1,6 +1,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE-BSD-3-Clause file.
 
+#[cfg(target_os = "macos")]
+use crate::libc_compat as libc;
+
 use crate::fuse;
 use crate::passthrough::device_state::preserialization::InodeMigrationInfo;
 use crate::passthrough::file_handle::{FileHandle, FileOrHandle};
@@ -134,7 +137,11 @@ impl<'a> InodeData {
         match &self.file_or_handle {
             FileOrHandle::File(f) => Ok(InodeFile::Ref(f.get_file())),
             FileOrHandle::Handle(h) => {
-                let file = h.open(libc::O_PATH)?;
+                #[cfg(target_os = "linux")]
+                let o_path_flag = libc::O_PATH;
+                #[cfg(target_os = "macos")]
+                let o_path_flag = libc::O_RDONLY; // O_PATH not available on macOS
+                let file = h.open(o_path_flag)?;
                 Ok(InodeFile::Owned(file))
             }
             FileOrHandle::Invalid(err) => Err(io::Error::new(
@@ -195,14 +202,14 @@ impl<'a> InodeData {
         if let Ok(path) = self.get_path(proc_self_fd) {
             path.to_string_lossy().to_string()
         } else {
-            let mode = match self.mode & libc::S_IFMT {
-                libc::S_IFREG => "file",
-                libc::S_IFDIR => "directory",
-                libc::S_IFLNK => "symbolic link",
-                libc::S_IFIFO => "FIFO",
-                libc::S_IFSOCK => "socket",
-                libc::S_IFCHR => "character device",
-                libc::S_IFBLK => "block device",
+            let mode = match self.mode & libc::S_IFMT as u32 {
+                m if m == libc::S_IFREG as u32 => "file",
+                m if m == libc::S_IFDIR as u32 => "directory",
+                m if m == libc::S_IFLNK as u32 => "symbolic link",
+                m if m == libc::S_IFIFO as u32 => "FIFO",
+                m if m == libc::S_IFSOCK as u32 => "socket",
+                m if m == libc::S_IFCHR as u32 => "character device",
+                m if m == libc::S_IFBLK as u32 => "block device",
                 _ => "unknown inode type",
             };
             format!(

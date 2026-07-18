@@ -351,11 +351,16 @@ impl serialized::Inode {
         filename: &str,
     ) -> io::Result<InodeData> {
         let parent_fd = parent.get().get_file()?;
-        let fd = openat(
-            &parent_fd,
-            filename,
-            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
+        let fd = openat(&parent_fd, filename, {
+            #[cfg(target_os = "linux")]
+            {
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC
+            }
+            #[cfg(target_os = "macos")]
+            {
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC
+            }
+        })
         .map_err(|err| {
             let pfd = printable_fd(&parent_fd, Some(&fs.proc_self_fd));
             io::Error::new(
@@ -385,7 +390,7 @@ impl serialized::Inode {
                 dev: st.st.st_dev,
                 mnt_id: st.mnt_id,
             },
-            mode: st.st.st_mode,
+            mode: st.st.st_mode as u32,
             migration_info: Mutex::new(None),
         })
     }
@@ -450,8 +455,12 @@ impl serialized::Inode {
             .ok_or_else(|| other_io_error(format!("Unknown mount ID {source_mount_id}")))?;
         let ofh = handle.to_openable(Arc::clone(mfd))?;
 
+        #[cfg(target_os = "linux")]
+        let o_path_flag = libc::O_PATH;
+        #[cfg(target_os = "macos")]
+        let o_path_flag = libc::O_RDONLY;
         let fd = ofh
-            .open(libc::O_PATH)
+            .open(o_path_flag)
             .err_context(|| "Opening file handle")?;
         let st = statx(&fd, None).err_context(|| "stat")?;
 
@@ -471,7 +480,7 @@ impl serialized::Inode {
                 dev: st.st.st_dev,
                 mnt_id: st.mnt_id,
             },
-            mode: st.st.st_mode,
+            mode: st.st.st_mode as u32,
             migration_info: Mutex::new(None),
         })
     }

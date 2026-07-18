@@ -41,7 +41,7 @@ impl UnixCredentials {
         let current_uid = HostUid::from(unsafe { libc::geteuid() });
         let current_gid = HostGid::from(unsafe { libc::getegid() });
 
-        // Not to change UID/GID when they’re 0 (root) is legacy behavior that we’re afraid to
+        // Not to change UID/GID when they're 0 (root) is legacy behavior that we're afraid to
         // change
         let change_uid = !self.uid.is_root() && self.uid != current_uid;
         let change_gid = !self.gid.is_root() && self.gid != current_gid;
@@ -61,6 +61,7 @@ impl UnixCredentials {
             oslib::seteffuid(self.uid)?;
         }
 
+        #[cfg(target_os = "linux")]
         if change_uid && self.keep_capability {
             // Before kernel 6.3, we don't have access to process supplementary groups.
             // To work around this we can set the `DAC_OVERRIDE` in the effective set.
@@ -72,6 +73,9 @@ impl UnixCredentials {
                 warn!("failed to add 'DAC_OVERRIDE' to the effective set of capabilities: {e}");
             }
         }
+
+        // macOS: capabilities are not available, so we skip the DAC_OVERRIDE step.
+        // If running as root, credential switching still works via seteuid/setegid.
 
         if !change_uid && !change_gid {
             return Ok(None);
@@ -113,10 +117,12 @@ impl Drop for UnixCredentialsGuard {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub struct ScopedCaps {
     cap: capng::Capability,
 }
 
+#[cfg(target_os = "linux")]
 impl ScopedCaps {
     fn new(cap_name: &str) -> io::Result<Option<Self>> {
         use capng::{Action, CUpdate, Set, Type};
@@ -148,6 +154,7 @@ impl ScopedCaps {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for ScopedCaps {
     fn drop(&mut self) {
         use capng::{Action, CUpdate, Set, Type};
@@ -170,6 +177,17 @@ impl Drop for ScopedCaps {
     }
 }
 
+/// macOS: ScopedCaps stub — capabilities don't exist on macOS.
+#[cfg(target_os = "macos")]
+pub struct ScopedCaps;
+
+#[cfg(target_os = "linux")]
 pub fn drop_effective_cap(cap_name: &str) -> io::Result<Option<ScopedCaps>> {
     ScopedCaps::new(cap_name)
+}
+
+/// macOS: No capabilities to drop. Always returns None.
+#[cfg(target_os = "macos")]
+pub fn drop_effective_cap(_cap_name: &str) -> io::Result<Option<ScopedCaps>> {
+    Ok(None)
 }

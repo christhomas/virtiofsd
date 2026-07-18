@@ -2,20 +2,46 @@
 
 use libc::{getrlimit, rlim_t, rlimit, setrlimit, RLIMIT_NOFILE};
 use std::mem::MaybeUninit;
-use std::{cmp, fs, io};
+use std::{cmp, io};
 
 // Default number of open files (RLIMIT_NOFILE)
 const DEFAULT_NOFILE: rlim_t = 1_000_000;
 
 /// Gets the maximum number of open files.
+#[cfg(target_os = "linux")]
 fn get_max_nofile() -> Result<rlim_t, String> {
     let path = "/proc/sys/fs/nr_open";
-    let max_str = fs::read_to_string(path).map_err(|error| format!("Reading {path}: {error:?}"))?;
+    let max_str =
+        std::fs::read_to_string(path).map_err(|error| format!("Reading {path}: {error:?}"))?;
 
     max_str
         .trim()
         .parse()
         .map_err(|error| format!("Parsing {path}: {error:?}"))
+}
+
+/// macOS: /proc/sys/fs/nr_open does not exist. Use sysctl kern.maxfilesperproc.
+#[cfg(target_os = "macos")]
+fn get_max_nofile() -> Result<rlim_t, String> {
+    let mut val: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>();
+    let name = std::ffi::CString::new("kern.maxfilesperproc").unwrap();
+    let ret = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            &mut val as *mut _ as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ret != 0 {
+        return Err(format!(
+            "sysctlbyname(kern.maxfilesperproc): {}",
+            io::Error::last_os_error()
+        ));
+    }
+    Ok(val as rlim_t)
 }
 
 /// Gets the hard limit of open files.

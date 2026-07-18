@@ -233,9 +233,21 @@ impl<'a> Constructor<'a> {
         }
 
         let path_fd = {
-            let fd = self
-                .fs
-                .open_relative_to(parent_fd, name, libc::O_PATH, None)?;
+            let fd = self.fs.open_relative_to(
+                parent_fd,
+                name,
+                {
+                    #[cfg(target_os = "linux")]
+                    {
+                        libc::O_PATH
+                    }
+                    #[cfg(target_os = "macos")]
+                    {
+                        libc::O_RDONLY
+                    }
+                },
+                None,
+            )?;
             unsafe { File::from_raw_fd(fd) }
         };
         let stat = statx(&path_fd, None)?;
@@ -303,7 +315,7 @@ impl<'a> Constructor<'a> {
             file_or_handle,
             refcount: AtomicU64::new(1),
             ids,
-            mode: stat.st.st_mode,
+            mode: stat.st.st_mode as u32,
             migration_info: Mutex::new(Some(mig_info)),
         };
 

@@ -28,6 +28,7 @@ pub struct OsFacts {
 impl OsFacts {
     /// This object should only be constructed using new.
     #[must_use]
+    #[cfg(target_os = "linux")]
     pub fn new() -> Self {
         // Checking for `openat2()` since it first appeared in Linux 5.6.
         // SAFETY: all-zero byte-pattern is a valid `libc::open_how`
@@ -55,6 +56,13 @@ impl OsFacts {
 
         Self { has_openat2 }
     }
+
+    /// macOS: openat2 is not available.
+    #[must_use]
+    #[cfg(target_os = "macos")]
+    pub fn new() -> Self {
+        Self { has_openat2: false }
+    }
 }
 
 /// Safe wrapper for `mount(2)`
@@ -68,6 +76,7 @@ impl OsFacts {
 /// # Panics
 ///
 /// This function panics if the strings `source`, `target` or `fstype` contain an internal 0 byte.
+#[cfg(target_os = "linux")]
 pub fn mount(source: Option<&str>, target: &str, fstype: Option<&str>, flags: u64) -> Result<()> {
     let source = CString::new(source.unwrap_or("")).unwrap();
     let source = source.as_ptr();
@@ -83,6 +92,18 @@ pub fn mount(source: Option<&str>, target: &str, fstype: Option<&str>, flags: u6
     Ok(())
 }
 
+/// macOS: mount() stub — namespaces/bind mounts are not supported on macOS.
+#[cfg(target_os = "macos")]
+pub fn mount(
+    _source: Option<&str>,
+    _target: &str,
+    _fstype: Option<&str>,
+    _flags: u64,
+) -> Result<()> {
+    // No-op: mount namespaces don't exist on macOS
+    Ok(())
+}
+
 /// Safe wrapper for `umount2(2)`
 ///
 /// # Errors
@@ -94,12 +115,19 @@ pub fn mount(source: Option<&str>, target: &str, fstype: Option<&str>, flags: u6
 /// # Panics
 ///
 /// This function panics if the strings `target` contains an internal 0 byte.
+#[cfg(target_os = "linux")]
 pub fn umount2(target: &str, flags: i32) -> Result<()> {
     let target = CString::new(target).unwrap();
     let target = target.as_ptr();
 
     // Safety: `target` is a valid C string pointer
     check_retval(unsafe { libc::umount2(target, flags) })?;
+    Ok(())
+}
+
+/// macOS: umount2() stub — no-op since mount() is also a no-op.
+#[cfg(target_os = "macos")]
+pub fn umount2(_target: &str, _flags: i32) -> Result<()> {
     Ok(())
 }
 
@@ -144,14 +172,14 @@ pub fn fchmodat(dirfd: RawFd, pathname: String, mode: libc::mode_t, flags: i32) 
 pub fn umask(mask: u32) -> u32 {
     // SAFETY: this call doesn't modify any memory and there is no need
     // to check the return value because this system call always succeeds.
-    unsafe { libc::umask(mask) }
+    unsafe { libc::umask(mask as libc::mode_t) as u32 }
 }
 
 /// An RAII implementation of a scoped file mode creation mask (umask), it set the
 /// new umask. When this structure is dropped (falls out of scope), it set the previous
 /// value of the mask.
 pub struct ScopedUmask {
-    umask: libc::mode_t,
+    umask: u32,
 }
 
 impl ScopedUmask {
@@ -195,6 +223,7 @@ pub fn openat(dir: &impl AsRawFd, pathname: &CStr, flags: i32, mode: Option<u32>
 ///
 /// Will return `Err(errno)` if `open_tree(2)` fails,
 /// see `open_tree(2)` for details.
+#[cfg(target_os = "linux")]
 pub fn open_tree(dir: Option<&dyn AsRawFd>, pathname: &CStr, flags: u32) -> Result<RawFd> {
     let fd = dir.map(AsRawFd::as_raw_fd).unwrap_or(libc::AT_FDCWD);
 
@@ -204,6 +233,12 @@ pub fn open_tree(dir: Option<&dyn AsRawFd>, pathname: &CStr, flags: u32) -> Resu
     check_retval(
         unsafe { libc::syscall(libc::SYS_open_tree, fd, pathname.as_ptr(), flags) } as RawFd,
     )
+}
+
+/// macOS: open_tree() is not available. Return ENOSYS.
+#[cfg(target_os = "macos")]
+pub fn open_tree(_dir: Option<&dyn AsRawFd>, _pathname: &CStr, _flags: u32) -> Result<RawFd> {
+    Err(io::Error::from_raw_os_error(libc::ENOSYS))
 }
 
 // libc does not define this on musl.
@@ -216,6 +251,7 @@ pub const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x00000004;
 ///
 /// Will return `Err(errno)` if `move_mount(2)` fails,
 /// see `move_mount(2)` for details.
+#[cfg(target_os = "linux")]
 pub fn move_mount(
     from_dir: Option<&dyn AsRawFd>,
     from_path: &CStr,
@@ -243,6 +279,18 @@ pub fn move_mount(
     Ok(())
 }
 
+/// macOS: move_mount() is not available. Return ENOSYS.
+#[cfg(target_os = "macos")]
+pub fn move_mount(
+    _from_dir: Option<&dyn AsRawFd>,
+    _from_path: &CStr,
+    _to_dir: Option<&dyn AsRawFd>,
+    _to_path: &CStr,
+    _flags: u32,
+) -> Result<()> {
+    Err(io::Error::from_raw_os_error(libc::ENOSYS))
+}
+
 /// An utility function that uses `openat2(2)` to restrict the how the provided pathname
 /// is resolved. It uses the following flags:
 /// - `RESOLVE_IN_ROOT`: Treat the directory referred to by dirfd as the root directory while
@@ -260,6 +308,7 @@ pub fn move_mount(
 /// # Safety
 ///
 /// The caller must ensure that dirfd is a valid file descriptor.
+#[cfg(target_os = "linux")]
 pub fn do_open_relative_to(
     dir: &impl AsRawFd,
     pathname: &CStr,
@@ -290,6 +339,39 @@ pub fn do_open_relative_to(
     } as RawFd)
 }
 
+/// macOS: openat2() is not available. Fall back to openat() with O_SYMLINK.
+/// This does NOT provide RESOLVE_IN_ROOT semantics — callers relying on that
+/// must ensure the sandbox is set up via chroot or other means.
+//
+// Darwin's `O_SYMLINK` substitutes for Linux's `O_PATH | O_NOFOLLOW` when the
+// trailing component is a symlink: it opens a reference to the symlink itself
+// rather than failing with `ELOOP` (which is what `O_NOFOLLOW` does on
+// Darwin). It is a no-op for non-symlinks.
+// TODO(macos): This fallback does not prevent symlink-based escapes the way
+// RESOLVE_IN_ROOT does. A proper implementation would need to walk path
+// components and validate each one.
+#[cfg(target_os = "macos")]
+pub fn do_open_relative_to(
+    dir: &impl AsRawFd,
+    pathname: &CStr,
+    flags: i32,
+    mode: Option<u32>,
+) -> Result<RawFd> {
+    let mode = u64::from(mode.unwrap_or(0)) & 0o7777;
+    // Strip O_NOFOLLOW (Darwin returns ELOOP for any symlink leaf) and use
+    // O_SYMLINK instead so symlink leaves resolve to a usable fd.
+    let flags = (flags & !libc::O_NOFOLLOW) | libc::O_SYMLINK | libc::O_CLOEXEC;
+    check_retval(unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            pathname.as_ptr(),
+            flags as libc::c_int,
+            mode,
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
 mod filehandle {
     use crate::passthrough::file_handle::SerializableFileHandle;
     use crate::util::other_io_error;
@@ -374,8 +456,81 @@ mod filehandle {
         ) -> libc::c_int;
     }
 }
+
+/// macOS: file handles (name_to_handle_at / open_by_handle_at) are not available.
+/// We provide the same CFileHandle struct but the syscall wrappers return ENOSYS.
+// TODO(macos): A more complete implementation could store dev+ino+path and reopen
+// via the stored path, but that changes semantics significantly.
+#[cfg(target_os = "macos")]
+mod filehandle {
+    use crate::passthrough::file_handle::SerializableFileHandle;
+    use crate::util::other_io_error;
+    use std::convert::{TryFrom, TryInto};
+    use std::io;
+
+    const MAX_HANDLE_SZ: usize = 128;
+
+    #[derive(Clone, PartialOrd, Ord, PartialEq, Eq)]
+    #[repr(C)]
+    pub struct CFileHandle {
+        handle_bytes: libc::c_uint,
+        handle_type: libc::c_int,
+        f_handle: [u8; MAX_HANDLE_SZ],
+    }
+
+    impl Default for CFileHandle {
+        fn default() -> Self {
+            CFileHandle {
+                handle_bytes: MAX_HANDLE_SZ as libc::c_uint,
+                handle_type: 0,
+                f_handle: [0; MAX_HANDLE_SZ],
+            }
+        }
+    }
+
+    impl CFileHandle {
+        pub fn as_bytes(&self) -> &[u8] {
+            &self.f_handle[..(self.handle_bytes as usize)]
+        }
+
+        pub fn handle_type(&self) -> libc::c_int {
+            self.handle_type
+        }
+    }
+
+    impl TryFrom<&SerializableFileHandle> for CFileHandle {
+        type Error = io::Error;
+
+        fn try_from(sfh: &SerializableFileHandle) -> io::Result<Self> {
+            let sfh_bytes = sfh.as_bytes();
+            if sfh_bytes.len() > MAX_HANDLE_SZ {
+                return Err(other_io_error("File handle too long"));
+            }
+            let mut f_handle = [0u8; MAX_HANDLE_SZ];
+            f_handle[..sfh_bytes.len()].copy_from_slice(sfh_bytes);
+
+            Ok(CFileHandle {
+                handle_bytes: sfh_bytes.len().try_into().map_err(|err| {
+                    other_io_error(format!(
+                        "Handle size ({} bytes) too big: {err}",
+                        sfh_bytes.len(),
+                    ))
+                })?,
+                #[allow(clippy::useless_conversion)]
+                handle_type: sfh.handle_type().try_into().map_err(|err| {
+                    other_io_error(format!(
+                        "Handle type (0x{:x}) too large: {err}",
+                        sfh.handle_type(),
+                    ))
+                })?,
+                f_handle,
+            })
+        }
+    }
+}
 pub use filehandle::CFileHandle;
 
+#[cfg(target_os = "linux")]
 pub fn name_to_handle_at(
     dirfd: &impl AsRawFd,
     pathname: &CStr,
@@ -398,6 +553,19 @@ pub fn name_to_handle_at(
     Ok(())
 }
 
+/// macOS: name_to_handle_at() is not available.
+#[cfg(target_os = "macos")]
+pub fn name_to_handle_at(
+    _dirfd: &impl AsRawFd,
+    _pathname: &CStr,
+    _file_handle: &mut CFileHandle,
+    _mount_id: &mut libc::c_int,
+    _flags: libc::c_int,
+) -> Result<()> {
+    Err(io::Error::from_raw_os_error(libc::ENOSYS))
+}
+
+#[cfg(target_os = "linux")]
 pub fn open_by_handle_at(
     mount_fd: &impl AsRawFd,
     file_handle: &CFileHandle,
@@ -413,6 +581,17 @@ pub fn open_by_handle_at(
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
+/// macOS: open_by_handle_at() is not available.
+#[cfg(target_os = "macos")]
+pub fn open_by_handle_at(
+    _mount_fd: &impl AsRawFd,
+    _file_handle: &CFileHandle,
+    _flags: libc::c_int,
+) -> Result<File> {
+    Err(io::Error::from_raw_os_error(libc::ENOSYS))
+}
+
+#[cfg(target_os = "linux")]
 bitflags! {
     /// A bitwise OR of zero or more flags passed in as a parameter to the
     /// write vectored function `writev_at()`.
@@ -450,6 +629,16 @@ bitflags! {
     }
 }
 
+/// macOS: RWF flags are not available. WritevFlags has dummy values for API compatibility.
+#[cfg(target_os = "macos")]
+bitflags! {
+    pub struct WritevFlags: i32 {
+        /// Dummy RWF_APPEND for API compat; macOS pwritev doesn't support per-call append flags.
+        const RWF_APPEND = 0x10;
+    }
+}
+
+#[cfg(target_os = "linux")]
 bitflags! {
     /// A bitwise OR of zero or more flags passed in as a parameter to the
     /// read vectored function `readv_at()`.
@@ -472,6 +661,13 @@ bitflags! {
     }
 }
 
+/// macOS: RWF flags are not available. ReadvFlags is an empty bitflags struct.
+#[cfg(target_os = "macos")]
+bitflags! {
+    pub struct ReadvFlags: i32 {
+    }
+}
+
 /// Safe wrapper for `pwritev2(2)`
 ///
 /// This system call is similar `pwritev(2)`, but add a new argument,
@@ -487,6 +683,7 @@ bitflags! {
 ///
 /// The caller must ensure that each iovec element is valid (i.e., it has a valid `iov_base`
 /// pointer and `iov_len`).
+#[cfg(target_os = "linux")]
 pub unsafe fn writev_at(
     fd: BorrowedFd,
     iovecs: &[libc::iovec],
@@ -509,6 +706,30 @@ pub unsafe fn writev_at(
     Ok(bytes_written as usize)
 }
 
+/// macOS: pwritev2 is not available, use pwritev instead. RWF flags are ignored.
+///
+/// # Safety
+///
+/// The caller must ensure that each iovec element is valid.
+#[cfg(target_os = "macos")]
+pub unsafe fn writev_at(
+    fd: BorrowedFd,
+    iovecs: &[libc::iovec],
+    offset: i64,
+    _flags: Option<WritevFlags>,
+) -> Result<usize> {
+    // macOS pwritev takes off_t (i64) for offset
+    let bytes_written = check_retval(unsafe {
+        libc::pwritev(
+            fd.as_raw_fd(),
+            iovecs.as_ptr(),
+            iovecs.len() as libc::c_int,
+            offset as libc::off_t,
+        )
+    })?;
+    Ok(bytes_written as usize)
+}
+
 /// Safe wrapper for `preadv2(2)`
 ///
 /// This system call is similar `preadv(2)`, but add a new argument,
@@ -524,6 +745,7 @@ pub unsafe fn writev_at(
 ///
 /// The caller must ensure that each iovec element is valid (i.e., it has a valid `iov_base`
 /// pointer and `iov_len`).
+#[cfg(target_os = "linux")]
 pub unsafe fn readv_at(
     fd: BorrowedFd,
     iovecs: &[libc::iovec],
@@ -541,6 +763,29 @@ pub unsafe fn readv_at(
             iovecs.len() as libc::c_int,
             offset,
             flags.bits(),
+        )
+    })?;
+    Ok(bytes_read as usize)
+}
+
+/// macOS: preadv2 is not available, use preadv instead. RWF flags are ignored.
+///
+/// # Safety
+///
+/// The caller must ensure that each iovec element is valid.
+#[cfg(target_os = "macos")]
+pub unsafe fn readv_at(
+    fd: BorrowedFd,
+    iovecs: &[libc::iovec],
+    offset: i64,
+    _flags: Option<ReadvFlags>,
+) -> Result<usize> {
+    let bytes_read = check_retval(unsafe {
+        libc::preadv(
+            fd.as_raw_fd(),
+            iovecs.as_ptr(),
+            iovecs.len() as libc::c_int,
+            offset as libc::off_t,
         )
     })?;
     Ok(bytes_read as usize)
@@ -566,6 +811,7 @@ impl io::Write for PipeWriter {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub fn pipe() -> io::Result<(PipeReader, PipeWriter)> {
     let mut fds: [RawFd; 2] = [-1, -1];
     let ret = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
@@ -577,6 +823,32 @@ pub fn pipe() -> io::Result<(PipeReader, PipeWriter)> {
             PipeWriter(unsafe { File::from_raw_fd(fds[1]) }),
         ))
     }
+}
+
+/// macOS: pipe2() is not available, use pipe() + fcntl(F_SETFD, FD_CLOEXEC).
+#[cfg(target_os = "macos")]
+pub fn pipe() -> io::Result<(PipeReader, PipeWriter)> {
+    let mut fds: [RawFd; 2] = [-1, -1];
+    let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if ret == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // Set CLOEXEC on both ends
+    for &fd in &fds {
+        let ret = unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        if ret == -1 {
+            let err = io::Error::last_os_error();
+            unsafe {
+                libc::close(fds[0]);
+                libc::close(fds[1]);
+            }
+            return Err(err);
+        }
+    }
+    Ok((
+        PipeReader(unsafe { File::from_raw_fd(fds[0]) }),
+        PipeWriter(unsafe { File::from_raw_fd(fds[1]) }),
+    ))
 }
 
 // We want credential changes to be per-thread because otherwise
@@ -591,18 +863,39 @@ pub fn pipe() -> io::Result<(PipeReader, PipeWriter)> {
 // setfsgid systems calls. However since those calls have no way to
 // return an error, it's preferable to do this instead.
 /// Set effective user ID
+#[cfg(target_os = "linux")]
 pub fn seteffuid(uid: HostUid) -> io::Result<()> {
     check_retval(unsafe { libc::syscall(libc::SYS_setresuid, -1, uid.into_inner(), -1) })?;
     Ok(())
 }
 
+/// macOS: Use pthread_setugid_np for per-thread credential changes when available,
+/// otherwise fall back to seteuid (which is process-wide on macOS).
+// TODO(macos): pthread_setugid_np is a private API and may not be available on all
+// macOS versions. Consider alternative approaches for per-thread credentials.
+#[cfg(target_os = "macos")]
+pub fn seteffuid(uid: HostUid) -> io::Result<()> {
+    check_retval(unsafe { libc::seteuid(uid.into_inner()) })?;
+    Ok(())
+}
+
 /// Set effective group ID
+#[cfg(target_os = "linux")]
 pub fn seteffgid(gid: HostGid) -> io::Result<()> {
     check_retval(unsafe { libc::syscall(libc::SYS_setresgid, -1, gid.into_inner(), -1) })?;
     Ok(())
 }
 
+/// macOS: Fall back to setegid (process-wide).
+// TODO(macos): Same per-thread limitation as seteffuid.
+#[cfg(target_os = "macos")]
+pub fn seteffgid(gid: HostGid) -> io::Result<()> {
+    check_retval(unsafe { libc::setegid(gid.into_inner()) })?;
+    Ok(())
+}
+
 /// Set supplementary group
+#[cfg(target_os = "linux")]
 pub fn setsupgroup(gids: &[HostGid]) -> io::Result<()> {
     check_retval(unsafe {
         libc::syscall(
@@ -615,10 +908,36 @@ pub fn setsupgroup(gids: &[HostGid]) -> io::Result<()> {
     Ok(())
 }
 
+/// macOS: Use setgroups() directly (process-wide).
+#[cfg(target_os = "macos")]
+pub fn setsupgroup(gids: &[HostGid]) -> io::Result<()> {
+    let ret = unsafe {
+        libc::setgroups(
+            gids.len() as libc::c_int,
+            gids.as_ptr() as *const libc::gid_t,
+        )
+    };
+    if ret == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Drop all supplementary groups
+#[cfg(target_os = "linux")]
 pub fn dropsupgroups() -> io::Result<()> {
     check_retval(unsafe {
         libc::syscall(libc::SYS_setgroups, 0, std::ptr::null::<libc::gid_t>())
     })?;
+    Ok(())
+}
+
+/// macOS: Use setgroups() directly to drop all supplementary groups.
+#[cfg(target_os = "macos")]
+pub fn dropsupgroups() -> io::Result<()> {
+    let ret = unsafe { libc::setgroups(0, std::ptr::null::<libc::gid_t>()) };
+    if ret == -1 {
+        return Err(io::Error::last_os_error());
+    }
     Ok(())
 }

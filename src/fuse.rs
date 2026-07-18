@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#[cfg(target_os = "macos")]
+use crate::libc_compat as libc;
+
 use std::convert::TryFrom;
 use std::io;
 
@@ -647,7 +650,7 @@ impl Attr {
             atimensec: st.st_atime_nsec as u32,
             mtimensec: st.st_mtime_nsec as u32,
             ctimensec: st.st_ctime_nsec as u32,
-            mode: st.st_mode,
+            mode: st.st_mode as u32,
             nlink: st.st_nlink as u32,
             uid,
             gid,
@@ -677,11 +680,11 @@ unsafe impl ByteValued for Kstatfs {}
 impl From<libc::statvfs64> for Kstatfs {
     fn from(st: libc::statvfs64) -> Self {
         Kstatfs {
-            blocks: st.f_blocks,
-            bfree: st.f_bfree,
-            bavail: st.f_bavail,
-            files: st.f_files,
-            ffree: st.f_ffree,
+            blocks: st.f_blocks as u64,
+            bfree: st.f_bfree as u64,
+            bavail: st.f_bavail as u64,
+            files: st.f_files as u64,
+            ffree: st.f_ffree as u64,
             bsize: st.f_bsize as u32,
             namelen: st.f_namemax as u32,
             frsize: st.f_frsize as u32,

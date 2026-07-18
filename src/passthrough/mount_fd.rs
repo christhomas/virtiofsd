@@ -297,7 +297,11 @@ impl MountFds {
                     .prefix(format!("Failed to convert \"{mount_point}\" to a CString"))
             })?;
 
-            let mount_point_fd = unsafe { libc::open(c_mount_point.as_ptr(), libc::O_PATH) };
+            #[cfg(target_os = "linux")]
+            let o_path_flag = libc::O_PATH;
+            #[cfg(target_os = "macos")]
+            let o_path_flag = libc::O_RDONLY; // O_PATH not available on macOS
+            let mount_point_fd = unsafe { libc::open(c_mount_point.as_ptr(), o_path_flag) };
             if mount_point_fd < 0 {
                 return Err(self
                     .error_for(mount_id, io::Error::last_os_error())

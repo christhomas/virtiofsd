@@ -2,8 +2,16 @@
 //
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 
+// macOS and Linux differ in several libc type widths (e.g. mode_t is u16 on
+// macOS but u32 on Linux), so numeric casts that are load-bearing on macOS are
+// redundant no-ops on Linux. Allow the resulting lint crate-wide.
+#![allow(clippy::unnecessary_cast)]
+
 #[macro_use]
 extern crate log;
+
+#[cfg(target_os = "macos")]
+pub mod libc_compat;
 
 pub mod descriptor_utils;
 pub mod file_traits;
@@ -12,6 +20,7 @@ pub mod fuse;
 pub mod idmap;
 pub mod limits;
 pub mod macros;
+pub mod notify_invalidate;
 pub mod oslib;
 pub mod passthrough;
 pub mod read_dir;

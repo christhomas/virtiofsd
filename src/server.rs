@@ -23,6 +23,97 @@ use vm_memory::ByteValued;
 
 const FUSE_BUFFER_HEADER_SIZE: u32 = 0x1000;
 const MAX_BUFFER_SIZE: u32 = 1 << 20;
+
+/// Translate a native errno value to a Linux errno value.
+///
+/// The FUSE protocol uses Linux errno values. On Linux this is a no-op, but on macOS
+/// many errno values differ and must be translated before being sent to the guest kernel.
+#[cfg(target_os = "linux")]
+#[inline]
+fn errno_to_linux(errno: i32) -> i32 {
+    errno
+}
+
+#[cfg(target_os = "macos")]
+fn errno_to_linux(errno: i32) -> i32 {
+    // The FUSE protocol uses Linux errno values. macOS and Linux agree on
+    // 1..=34 (EPERM..ERANGE), then diverge wildly. Each entry below is the
+    // numeric value Apple ships in <sys/errno.h> mapped to its Linux peer
+    // in <asm-generic/errno.h>. Unmapped values pass through unchanged
+    // because they are either (a) macOS-only (EAUTH, EPWROFF, ENOPOLICY,
+    // EOWNERDEAD-on-old-versions, ...) with no sensible Linux equivalent,
+    // or (b) already in the agreed 1..=34 range.
+    //
+    // If you change anything here, also update `errno_to_linux_table` in
+    // the test module — that's the regression net that catches the kind of
+    // silently-wrong entry that previously translated EOPNOTSUPP to
+    // ENETRESET and broke `qemu-img convert` over virtio-fs.
+    match errno {
+        35 => 11,  // EAGAIN/EWOULDBLOCK: macOS=35,  Linux=11
+        36 => 115, // EINPROGRESS:        macOS=36,  Linux=115
+        37 => 114, // EALREADY:           macOS=37,  Linux=114
+        38 => 88,  // ENOTSOCK:           macOS=38,  Linux=88
+        39 => 89,  // EDESTADDRREQ:       macOS=39,  Linux=89
+        40 => 90,  // EMSGSIZE:           macOS=40,  Linux=90
+        41 => 91,  // EPROTOTYPE:         macOS=41,  Linux=91
+        42 => 92,  // ENOPROTOOPT:        macOS=42,  Linux=92
+        43 => 93,  // EPROTONOSUPPORT:    macOS=43,  Linux=93
+        44 => 94,  // ESOCKTNOSUPPORT:    macOS=44,  Linux=94
+        45 => 95,  // ENOTSUP/EOPNOTSUPP: macOS=45,  Linux=95 (POSIX-flavor)
+        46 => 96,  // EPFNOSUPPORT:       macOS=46,  Linux=96
+        47 => 97,  // EAFNOSUPPORT:       macOS=47,  Linux=97
+        48 => 98,  // EADDRINUSE:         macOS=48,  Linux=98
+        49 => 99,  // EADDRNOTAVAIL:      macOS=49,  Linux=99
+        50 => 100, // ENETDOWN:           macOS=50,  Linux=100
+        51 => 101, // ENETUNREACH:        macOS=51,  Linux=101
+        52 => 102, // ENETRESET:          macOS=52,  Linux=102
+        53 => 103, // ECONNABORTED:       macOS=53,  Linux=103
+        54 => 104, // ECONNRESET:         macOS=54,  Linux=104
+        55 => 105, // ENOBUFS:            macOS=55,  Linux=105
+        56 => 106, // EISCONN:            macOS=56,  Linux=106
+        57 => 107, // ENOTCONN:           macOS=57,  Linux=107
+        58 => 108, // ESHUTDOWN:          macOS=58,  Linux=108
+        59 => 109, // ETOOMANYREFS:       macOS=59,  Linux=109
+        60 => 110, // ETIMEDOUT:          macOS=60,  Linux=110
+        61 => 111, // ECONNREFUSED:       macOS=61,  Linux=111
+        62 => 40,  // ELOOP:              macOS=62,  Linux=40
+        63 => 36,  // ENAMETOOLONG:       macOS=63,  Linux=36
+        64 => 112, // EHOSTDOWN:          macOS=64,  Linux=112
+        65 => 113, // EHOSTUNREACH:       macOS=65,  Linux=113
+        66 => 39,  // ENOTEMPTY:          macOS=66,  Linux=39
+        69 => 122, // EDQUOT:             macOS=69,  Linux=122
+        70 => 116, // ESTALE:             macOS=70,  Linux=116
+        77 => 37,  // ENOLCK:             macOS=77,  Linux=37
+        78 => 38,  // ENOSYS:             macOS=78,  Linux=38
+        84 => 75,  // EOVERFLOW:          macOS=84,  Linux=75
+        89 => 125, // ECANCELED:          macOS=89,  Linux=125
+        90 => 43,  // EIDRM:              macOS=90,  Linux=43
+        91 => 42,  // ENOMSG:             macOS=91,  Linux=42
+        92 => 84,  // EILSEQ:             macOS=92,  Linux=84
+        93 => 61,  // ENOATTR -> ENODATA: macOS=93,  Linux=61.
+        // Without this, APFS returning ENOATTR for missing xattrs
+        // (e.g. security.selinux, system.posix_acl_*) reaches the
+        // guest as Linux 93=EPROTONOSUPPORT, breaking `ls -la`.
+        94 => 74,  // EBADMSG:            macOS=94,  Linux=74
+        95 => 72,  // EMULTIHOP:          macOS=95,  Linux=72
+        96 => 61,  // ENODATA:            macOS=96,  Linux=61 (same Linux peer as ENOATTR)
+        97 => 67,  // ENOLINK:            macOS=97,  Linux=67
+        98 => 63,  // ENOSR:              macOS=98,  Linux=63
+        99 => 60,  // ENOSTR:             macOS=99,  Linux=60
+        100 => 71, // EPROTO:             macOS=100, Linux=71
+        101 => 62, // ETIME:              macOS=101, Linux=62
+        102 => 95, // EOPNOTSUPP:         macOS=102, Linux=95 (BSD-flavor — the
+        // value `libc::EOPNOTSUPP` actually compiles to on Darwin).
+        // Until this entry existed, our `fallocate` returning
+        // EOPNOTSUPP for unsupported modes reached the guest as
+        // Linux 102=ENETRESET, surfacing as
+        // "Network dropped connection on reset" out of `qemu-img`.
+        104 => 131, // ENOTRECOVERABLE:    macOS=104, Linux=131
+        105 => 130, // EOWNERDEAD:         macOS=105, Linux=130
+        _ => errno, // Pass through 1..=34 (EPERM..ERANGE — they agree)
+                     // and macOS-only values with no Linux peer.
+    }
+}
 const DIRENT_PADDING: [u8; 8] = [0; 8];
 
 const CURRENT_DIR_CSTR: &[u8] = b".";
@@ -507,8 +598,18 @@ impl<F: FileSystem + Sync> Server<F> {
     fn rename2(&self, in_header: InHeader, mut r: Reader, w: Writer) -> Result<usize> {
         let Rename2In { newdir, flags, .. } = r.read_obj().map_err(Error::DecodeMessage)?;
 
+        // FUSE rename flags use Linux kernel values. Define compat constants for macOS.
+        #[cfg(target_os = "linux")]
         let flags =
             flags & (libc::RENAME_EXCHANGE | libc::RENAME_NOREPLACE | libc::RENAME_WHITEOUT);
+        #[cfg(target_os = "macos")]
+        let flags = {
+            // Linux constants: RENAME_NOREPLACE=1, RENAME_EXCHANGE=2, RENAME_WHITEOUT=4
+            const LINUX_RENAME_NOREPLACE: u32 = 1;
+            const LINUX_RENAME_EXCHANGE: u32 = 2;
+            const LINUX_RENAME_WHITEOUT: u32 = 4;
+            flags & (LINUX_RENAME_NOREPLACE | LINUX_RENAME_EXCHANGE | LINUX_RENAME_WHITEOUT)
+        };
 
         self.do_rename(in_header, size_of::<Rename2In>(), newdir, flags, r, w)
     }
@@ -1549,9 +1650,10 @@ fn strerror(error: i32) -> String {
 }
 
 fn reply_error(e: io::Error, unique: u64, mut w: Writer) -> Result<usize> {
+    let native_errno = e.raw_os_error().unwrap_or(libc::EIO);
     let header = OutHeader {
         len: size_of::<OutHeader>() as u32,
-        error: -e.raw_os_error().unwrap_or(libc::EIO),
+        error: -errno_to_linux(native_errno),
         unique,
     };
 
@@ -1819,6 +1921,158 @@ mod tests {
         match err {
             Error::DecodeMessage(io_err) => assert_eq!(io_err.raw_os_error(), Some(libc::EINVAL)),
             other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    /// On Linux, errno values match the FUSE wire protocol — translation is a no-op.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn errno_to_linux_is_identity_on_linux() {
+        for v in [
+            libc::EPERM,
+            libc::ENOENT,
+            libc::EAGAIN,
+            libc::EOPNOTSUPP,
+            libc::ENETRESET,
+            libc::ECONNREFUSED,
+            libc::ENODATA,
+            libc::EOWNERDEAD,
+        ] {
+            assert_eq!(
+                errno_to_linux(v),
+                v,
+                "errno {v} should pass through on Linux"
+            );
+        }
+    }
+
+    /// macOS-side values that share the 1..=34 range with Linux (EPERM..ERANGE)
+    /// must pass through unchanged. If anyone ever "helpfully" adds a remap for
+    /// one of these, it silently corrupts the most common errors guests see.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn errno_to_linux_low_range_is_identity() {
+        for v in 1..=34 {
+            assert_eq!(
+                errno_to_linux(v),
+                v,
+                "errno {v} (low range) must pass through unchanged"
+            );
+        }
+    }
+
+    /// Authoritative table of `(macOS_errno, Linux_errno, name)` triples used
+    /// by the `errno_to_linux` regression test. If you change `errno_to_linux`,
+    /// update this table — and only this table — and CI catches any drift.
+    ///
+    /// macOS values are taken from `<sys/errno.h>` shipped with the Command
+    /// Line Tools; Linux values from `<asm-generic/errno.h>`. Never hand-edit
+    /// either column without cross-checking those headers.
+    #[cfg(target_os = "macos")]
+    const ERRNO_MAP: &[(i32, i32, &str)] = &[
+        (35, 11, "EAGAIN"),
+        (36, 115, "EINPROGRESS"),
+        (37, 114, "EALREADY"),
+        (38, 88, "ENOTSOCK"),
+        (39, 89, "EDESTADDRREQ"),
+        (40, 90, "EMSGSIZE"),
+        (41, 91, "EPROTOTYPE"),
+        (42, 92, "ENOPROTOOPT"),
+        (43, 93, "EPROTONOSUPPORT"),
+        (44, 94, "ESOCKTNOSUPPORT"),
+        (45, 95, "ENOTSUP/EOPNOTSUPP_POSIX"),
+        (46, 96, "EPFNOSUPPORT"),
+        (47, 97, "EAFNOSUPPORT"),
+        (48, 98, "EADDRINUSE"),
+        (49, 99, "EADDRNOTAVAIL"),
+        (50, 100, "ENETDOWN"),
+        (51, 101, "ENETUNREACH"),
+        (52, 102, "ENETRESET"),
+        (53, 103, "ECONNABORTED"),
+        (54, 104, "ECONNRESET"),
+        (55, 105, "ENOBUFS"),
+        (56, 106, "EISCONN"),
+        (57, 107, "ENOTCONN"),
+        (58, 108, "ESHUTDOWN"),
+        (59, 109, "ETOOMANYREFS"),
+        (60, 110, "ETIMEDOUT"),
+        (61, 111, "ECONNREFUSED"),
+        (62, 40, "ELOOP"),
+        (63, 36, "ENAMETOOLONG"),
+        (64, 112, "EHOSTDOWN"),
+        (65, 113, "EHOSTUNREACH"),
+        (66, 39, "ENOTEMPTY"),
+        (69, 122, "EDQUOT"),
+        (70, 116, "ESTALE"),
+        (77, 37, "ENOLCK"),
+        (78, 38, "ENOSYS"),
+        (84, 75, "EOVERFLOW"),
+        (89, 125, "ECANCELED"),
+        (90, 43, "EIDRM"),
+        (91, 42, "ENOMSG"),
+        (92, 84, "EILSEQ"),
+        (93, 61, "ENOATTR -> ENODATA"),
+        (94, 74, "EBADMSG"),
+        (95, 72, "EMULTIHOP"),
+        (96, 61, "ENODATA"),
+        (97, 67, "ENOLINK"),
+        (98, 63, "ENOSR"),
+        (99, 60, "ENOSTR"),
+        (100, 71, "EPROTO"),
+        (101, 62, "ETIME"),
+        (102, 95, "EOPNOTSUPP_BSD"),
+        (104, 131, "ENOTRECOVERABLE"),
+        (105, 130, "EOWNERDEAD"),
+    ];
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn errno_to_linux_table() {
+        for &(mac_errno, linux_errno, name) in ERRNO_MAP {
+            assert_eq!(
+                errno_to_linux(mac_errno),
+                linux_errno,
+                "macOS {name} (errno {mac_errno}) must translate to Linux {linux_errno}"
+            );
+        }
+    }
+
+    /// Specific regressions worth pinning so reading the test list tells the
+    /// story of what previously broke.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn errno_to_linux_eopnotsupp_is_not_enetreset() {
+        // libc::EOPNOTSUPP on Darwin is the BSD-flavor 102. Without an
+        // explicit entry it falls through unchanged, and Linux reads 102 as
+        // ENETRESET ("Network dropped connection on reset"). That's the
+        // exact bug that broke `qemu-img convert` over virtio-fs.
+        assert_eq!(libc::EOPNOTSUPP, 102);
+        assert_eq!(errno_to_linux(libc::EOPNOTSUPP), 95);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn errno_to_linux_enoattr_becomes_enodata() {
+        // APFS returns ENOATTR (93) for missing xattrs. On Linux the FUSE
+        // expectation is ENODATA (61). Without translation, `ls -la`
+        // probing for `security.selinux` / `system.posix_acl_access`
+        // sees Linux 93=EPROTONOSUPPORT and falls into a slow error path.
+        assert_eq!(errno_to_linux(93), 61);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn errno_to_linux_macos_only_codes_pass_through() {
+        // EAUTH (80), ENEEDAUTH (81), EPWROFF (82), EDEVERR (83),
+        // EBADEXEC (85), EBADARCH (86), ESHLIBVERS (87), EBADMACHO (88),
+        // ENOPOLICY (103), EQFULL (106). None has a meaningful Linux peer;
+        // pass through and let the guest see the raw value.
+        for v in [80, 81, 82, 83, 85, 86, 87, 88, 103, 106] {
+            assert_eq!(
+                errno_to_linux(v),
+                v,
+                "macOS-only errno {v} must pass through unchanged"
+            );
         }
     }
 }

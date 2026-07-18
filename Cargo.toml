@@ -14,7 +14,8 @@ exclude = [".gitlab-ci.yml"]
 [features]
 default = ["seccomp"]
 # Expose seccomp bindings from the library.
-seccomp = ["dep:libseccomp-sys"]
+# On Linux, this pulls in libseccomp-sys. On macOS, seccomp is a no-op.
+seccomp = []
 # Enabling Xen support will _disable_ QEMU/KVM support!
 xen = ["vhost-user-backend/xen", "vhost/xen", "vm-memory/xen"]
 
@@ -25,22 +26,34 @@ required-features = ["seccomp"]
 [dependencies]
 bitflags = "1.2"
 btree-range-map = "0.7"
-capng = "0.2.2"
 env_logger = "0.8.4"
 futures = { version = "0.3", features = ["thread-pool"] }
 libc = "0.2.177"
 log = "0.4"
-libseccomp-sys = { version = "0.2", optional = true }
 clap = { version = "4", features = ["derive"] }
 postcard = { version = "1.0", features = ["use-std"] }
 serde = { version = "1.0", features = ["derive"] }
-vhost-user-backend = "0.22"
-vhost = "0.16"
+vhost-user-backend = "0.23"
+vhost = "0.17"
 virtio-bindings = "0.2.7"
-vm-memory = { version = "=0.17.1", features = ["backend-mmap", "backend-atomic"] }
-virtio-queue = "0.17.0"
+vm-memory = { version = "0.18.0", features = ["backend-mmap", "backend-atomic"] }
+virtio-queue = "0.18.0"
 vmm-sys-util = "0.15.0"
 syslog = "6.1"
+notify = "6.1"
+crossbeam-channel = "0.5"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+capng = "0.2.2"
+libseccomp-sys = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[patch.crates-io]
+vhost = { git = "https://github.com/christhomas/vhost.git", branch = "cth/macos" }
+vhost-user-backend = { git = "https://github.com/christhomas/vhost.git", branch = "cth/macos" }
+vmm-sys-util = { git = "https://github.com/christhomas/rust-vmm.git", branch = "cth/macos-signal" }
 
 [profile.release]
 lto = true
