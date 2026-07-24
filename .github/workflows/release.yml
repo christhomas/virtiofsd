@@ -1,0 +1,208 @@
+# Release pipeline.
+#
+# Fires when a `vX.Y.Z` tag is pushed (or via manual dispatch against an
+# existing tag). It validates the version, builds the `virtiofsd` binary on
+# native runners, and attaches the tarballs to a GitHub Release on THIS repo.
+#
+# This repo only builds and publishes its OWN releases. It deliberately does
+# NOT push to the Homebrew tap or any other repo — no cross-project pipeline
+# links that could auto-ship software. The tap pulls these released artifacts
+# on its own, human-triggered schedule.
+#
+# Targets, all built on NATIVE runners (no cross-compilation):
+#   * darwin-arm64    (macos-15)        — consumed by Homebrew
+#   * darwin-x86_64   (macos-15-intel)  — consumed by Homebrew
+#   * linux-x86_64    (ubuntu-latest)   — downloadable artifact only
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re)release, e.g. v1.14.0'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  RUST_TOOLCHAIN: "1.95.0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Gate everything on a well-formed, monotonically-increasing version so
+  # Homebrew never receives a malformed or regressive release.
+  validate:
+    name: Validate version tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Validate tag format, Cargo.toml match, and monotonic version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RAW="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "Validating release tag: ${RAW}"
+
+          # 1) Format: vMAJOR.MINOR.PATCH with an optional -prerelease suffix
+          #    (e.g. v1.13.8 or v1.13.8-rc1).
+          if ! printf '%s' "${RAW}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::Tag '${RAW}' must be vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-prerelease"
+            exit 1
+          fi
+          VERSION="${RAW#v}"
+
+          # 2) Tag must match Cargo.toml so the built binary reports the same version.
+          CARGO_VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')"
+          if [ "${VERSION}" != "${CARGO_VERSION}" ]; then
+            echo "::error::Tag version '${VERSION}' != Cargo.toml version '${CARGO_VERSION}'. Bump Cargo.toml and re-tag."
+            exit 1
+          fi
+
+          # 3) Must be strictly newer than the latest published release. Map '-'
+          #    to '~' so `sort -V` orders pre-releases before their release
+          #    (1.13.8-rc1 < 1.13.8), matching SemVer.
+          LATEST="$(gh release list --repo "${GITHUB_REPOSITORY}" --limit 200 \
+                      --json tagName,isDraft --jq '.[] | select(.isDraft|not) | .tagName' 2>/dev/null \
+                    | sed 's/^v//' | sort -V | tail -1 || true)"
+          if [ -n "${LATEST}" ]; then
+            # Map '-' to '~' so `sort -V` orders pre-releases before the release
+            # they precede (1.13.8-rc1 < 1.13.8), matching SemVer.
+            new_cmp="$(printf '%s' "${VERSION}" | tr '-' '~')"
+            prev_cmp="$(printf '%s' "${LATEST}" | tr '-' '~')"
+            highest="$(printf '%s\n%s\n' "${new_cmp}" "${prev_cmp}" | sort -V | tail -1)"
+            if [ "${new_cmp}" = "${prev_cmp}" ] || [ "${highest}" != "${new_cmp}" ]; then
+              echo "::error::Version '${VERSION}' is not greater than the latest release '${LATEST}'. Homebrew requires increasing versions."
+              exit 1
+            fi
+            echo "OK: ${VERSION} > ${LATEST}"
+          else
+            echo "OK: first release (${VERSION}); no prior release to compare against."
+          fi
+
+  # A tag pushed past a broken commit must never ship: re-run the test suite.
+  test:
+    name: Test before release
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y -qq libseccomp-dev libcap-ng-dev
+      - run: cargo test
+
+  build:
+    name: build (${{ matrix.artifact }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            artifact: darwin-arm64
+          - runner: macos-15-intel
+            artifact: darwin-x86_64
+          - runner: ubuntu-latest
+            artifact: linux-x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y -qq libseccomp-dev libcap-ng-dev
+
+      - name: Determine version
+        id: ver
+        shell: bash
+        run: |
+          RAW="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "version=${RAW#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binary
+        run: cargo build --release --bin virtiofsd
+
+      - name: Package
+        shell: bash
+        run: |
+          set -eux
+          mkdir -p dist
+          cp target/release/virtiofsd dist/
+          cd dist
+          tar czf "virtiofsd-${{ steps.ver.outputs.version }}-${{ matrix.artifact }}.tar.gz" virtiofsd
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: virtiofsd-${{ matrix.artifact }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Build SHA256SUMS
+        shell: bash
+        run: |
+          set -eux
+          cd dist
+          shasum -a 256 virtiofsd-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Determine tag and version
+        id: ver
+        shell: bash
+        run: |
+          RAW="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=${RAW}" >> "$GITHUB_OUTPUT"
+          echo "version=${RAW#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: virtiofsd ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/virtiofsd-*.tar.gz
+            dist/SHA256SUMS
+          body: |
+            virtiofsd ${{ steps.ver.outputs.tag }} — macOS port (Apple Silicon + Intel) and Linux x86_64.
+
+            ## Install via Homebrew (macOS)
+            ```
+            brew install antimatter-studios/tap/virtiofsd
+            ```
+
+            The Linux binary is dynamically linked; it needs `libseccomp` and
+            `libcap-ng` available at runtime.
