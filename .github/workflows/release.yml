@@ -50,20 +50,41 @@ jobs:
           RAW="${{ github.event.inputs.tag || github.ref_name }}"
           echo "Validating release tag: ${RAW}"
 
-          # 1) Format: vMAJOR.MINOR.PATCH with an optional -prerelease suffix
-          #    (e.g. v1.13.8 or v1.13.8-rc1).
-          if ! printf '%s' "${RAW}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
-            echo "::error::Tag '${RAW}' must be vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-prerelease"
+          # 1) Format: vMAJOR.MINOR.PATCH, with an optional fourth component as a
+          #    PACKAGING REVISION (v1.14.0.1), and an optional -prerelease suffix.
+          #
+          #    The fourth component exists because Cargo.toml belongs upstream. This
+          #    fork tracks a GitLab project and sends its source changes there as a
+          #    merge request; editing the version in that request would be proposing
+          #    a release upstream has not made. But this fork still needs to ship a
+          #    macOS fix on top of an upstream version, and a tag can only be used
+          #    once.
+          #
+          #    So the first three components stay exactly upstream's, and the fourth
+          #    counts this fork's builds of it — the same meaning Debian gives
+          #    1.14.0-1. Nothing upstream sees changes, which is the point: it is the
+          #    variant least likely to read as a claim about their release.
+          #
+          #    Consequence worth knowing: the binary reports CARGO_PKG_VERSION, so
+          #    `virtiofsd --version` prints 1.14.0 for a v1.14.0.1 release. That is
+          #    accurate — the code IS upstream 1.14.0; only the packaging differs.
+          if ! printf '%s' "${RAW}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::Tag '${RAW}' must be vMAJOR.MINOR.PATCH, optionally .REVISION, optionally -prerelease"
             exit 1
           fi
           VERSION="${RAW#v}"
 
-          # 2) Tag must match Cargo.toml so the built binary reports the same version.
+          # 2) The upstream part of the tag must match Cargo.toml, so the binary
+          #    reports the version its source claims. The packaging revision and any
+          #    prerelease suffix are ours and are stripped before comparing.
+          UPSTREAM_PART="$(printf '%s' "${VERSION}" | sed -E 's/-.*$//; s/^([0-9]+\.[0-9]+\.[0-9]+)(\.[0-9]+)?$/\1/')"
           CARGO_VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')"
-          if [ "${VERSION}" != "${CARGO_VERSION}" ]; then
-            echo "::error::Tag version '${VERSION}' != Cargo.toml version '${CARGO_VERSION}'. Bump Cargo.toml and re-tag."
+          if [ "${UPSTREAM_PART}" != "${CARGO_VERSION}" ]; then
+            echo "::error::Tag '${VERSION}' targets upstream ${UPSTREAM_PART}, but Cargo.toml says ${CARGO_VERSION}." >&2
+            echo "::error::Either tag ${CARGO_VERSION} (optionally .REVISION), or rebase onto the upstream version you meant." >&2
             exit 1
           fi
+          echo "OK: tag targets upstream ${UPSTREAM_PART}, matching Cargo.toml"
 
           # 3) Must be strictly newer than the latest published release. Map '-'
           #    to '~' so `sort -V` orders pre-releases before their release
@@ -284,7 +305,18 @@ jobs:
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: virtiofsd ${{ steps.ver.outputs.tag }}
-          generate_release_notes: true
+          # generate_release_notes was true, and produced wrong notes.
+          #
+          # GitHub builds those notes from commit ancestry between this tag and the
+          # previous one. This branch is rebased onto upstream rather than merged,
+          # so each release tag is left on an abandoned lineage: v1.13.8 is not an
+          # ancestor of this branch, and `git describe` finds no tag from its tip at
+          # all. Asking for a diff between two tags that share no recent history
+          # yields either noise or nothing.
+          #
+          # The body below is written by hand instead, which is honest about what a
+          # fork release is: upstream's code at a stated version, plus this fork's
+          # port, built for these platforms.
           fail_on_unmatched_files: true
           files: |
             dist/virtiofsd-*.tar.gz
