@@ -140,8 +140,12 @@ jobs:
           RAW="${{ github.event.inputs.tag || github.ref_name }}"
           echo "version=${RAW#v}" >> "$GITHUB_OUTPUT"
 
+      # --locked so the build uses Cargo.lock exactly as committed and fails rather
+      # than silently resolving a newer dependency. A release that quietly picked
+      # up different crate versions than the tree describes is not reproducible by
+      # anyone, including us.
       - name: Build release binary
-        run: cargo build --release --bin virtiofsd
+        run: cargo build --release --locked --bin virtiofsd
 
       - name: Package
         shell: bash
@@ -152,10 +156,64 @@ jobs:
           cd dist
           tar czf "virtiofsd-${{ steps.ver.outputs.version }}-${{ matrix.artifact }}.tar.gz" virtiofsd
 
+      # Checksum the BINARY, not the archive. Two runs produce identical binaries;
+      # the archives can differ in metadata (mtimes, ordering) without the binary
+      # differing at all, so the binary hash is the only part that is independent
+      # of how it was packaged — and it is what the reproduce step can compare.
+      - name: Record the binary checksum and toolchain
+        id: sum
+        shell: bash
+        run: |
+          set -euo pipefail
+          sum=$(shasum -a 256 target/release/virtiofsd | cut -d' ' -f1)
+          echo "sha256=${sum}" >> "$GITHUB_OUTPUT"
+          # Single space between hash and name, so the file is easy to read and to
+          # parse. The name matches the published archive minus its extension.
+          echo "${sum} virtiofsd-${{ steps.ver.outputs.version }}-${{ matrix.artifact }}" \
+            > "checksum-${{ matrix.artifact }}.txt"
+          # Record the exact compiler, because "same source" only implies "same
+          # bytes" for a given toolchain. Without this a verifier cannot know which
+          # rustc to use, which makes the checksum unfalsifiable rather than proven.
+          rustc --version > "toolchain-${{ matrix.artifact }}.txt"
+          cat "checksum-${{ matrix.artifact }}.txt" "toolchain-${{ matrix.artifact }}.txt"
+
+      # Prove the claim rather than asserting it: wipe the build directory, rebuild
+      # from this same commit on this same runner, and require the binary to be
+      # byte-identical to the one just packaged.
+      #
+      # If a future change makes the build non-reproducible — an embedded timestamp,
+      # an absolute path, a floating dependency — this fails here, rather than a
+      # user discovering it when they try to verify a release.
+      #
+      # Scope worth being honest about: this proves determinism for a given
+      # toolchain, on a given runner image, from a given Cargo.lock. It does not
+      # prove the build is independent of the build path or of the machine. That is
+      # a stronger property, and it is not what is claimed.
+      - name: Reproduce the binary independently
+        shell: bash
+        run: |
+          set -euo pipefail
+          want='${{ steps.sum.outputs.sha256 }}'
+          cargo clean
+          cargo build --release --locked --bin virtiofsd
+          got=$(shasum -a 256 target/release/virtiofsd | cut -d' ' -f1)
+          if [ "$got" = "$want" ]; then
+            echo "${{ matrix.artifact }}: reproduced — ${got}"
+          else
+            echo "::error::${{ matrix.artifact }} did not reproduce. packaged=${want} rebuilt=${got}" >&2
+            exit 1
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: virtiofsd-${{ matrix.artifact }}
-          path: dist/*.tar.gz
+          # The checksum and toolchain files travel with the archive so the release
+          # job can assemble them into one provenance file. Each build runs on a
+          # different runner, so this is the only way they meet.
+          path: |
+            dist/*.tar.gz
+            checksum-${{ matrix.artifact }}.txt
+            toolchain-${{ matrix.artifact }}.txt
           if-no-files-found: error
           retention-days: 1
 
@@ -178,6 +236,14 @@ jobs:
           shasum -a 256 virtiofsd-*.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
+      # SHA256SUMS covers the archives, which is what a downloader verifies.
+      # binaries.txt covers the binaries INSIDE them, which is what someone
+      # rebuilding from source can compare against — an archive hash cannot be
+      # reproduced without reproducing the archiving too.
+      #
+      # Each build job already rebuilt its own binary and required a byte-identical
+      # result, so every line here has been checked on the runner that produced it.
+      # This file records the outcome and the compiler it holds for.
       - name: Determine tag and version
         id: ver
         shell: bash
@@ -185,6 +251,33 @@ jobs:
           RAW="${{ github.event.inputs.tag || github.ref_name }}"
           echo "tag=${RAW}" >> "$GITHUB_OUTPUT"
           echo "version=${RAW#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build binaries.txt
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "# virtiofsd ${{ steps.ver.outputs.tag }} — sha256 of the binary inside each archive."
+            echo "#"
+            echo "# Each was verified on its build runner by wiping the target directory,"
+            echo "# rebuilding from this commit, and requiring identical bytes. To check one"
+            echo "# yourself, build with the matching toolchain below and compare:"
+            echo "#"
+            echo "#   cargo build --release --locked --bin virtiofsd"
+            echo "#   shasum -a 256 target/release/virtiofsd"
+            echo "#"
+            for t in dist/toolchain-*.txt; do
+              [ -e "$t" ] || continue
+              a=$(basename "$t" .txt); a=${a#toolchain-}
+              echo "# ${a}: $(cat "$t")"
+            done
+            echo "#"
+            cat dist/checksum-*.txt
+          } > dist/binaries.txt
+          cat dist/binaries.txt
+          # The provenance files have served their purpose; keep them out of the
+          # release so the asset list stays the archives plus two sums files.
+          rm -f dist/checksum-*.txt dist/toolchain-*.txt
 
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
@@ -196,6 +289,7 @@ jobs:
           files: |
             dist/virtiofsd-*.tar.gz
             dist/SHA256SUMS
+            dist/binaries.txt
           body: |
             virtiofsd ${{ steps.ver.outputs.tag }} — macOS port (Apple Silicon + Intel) and Linux x86_64.
 
@@ -206,3 +300,22 @@ jobs:
 
             The Linux binary is dynamically linked; it needs `libseccomp` and
             `libcap-ng` available at runtime.
+
+            ## Verifying these binaries
+
+            `SHA256SUMS` covers the archives — check a download with
+            `shasum -a 256 -c SHA256SUMS`.
+
+            `binaries.txt` covers the binary *inside* each archive, and records the
+            exact compiler each was built with. Every line was verified on the runner
+            that produced it: the build directory was wiped, the binary rebuilt from
+            this commit, and the result required to be byte-identical. To repeat that
+            yourself, build with the toolchain named in the file and compare:
+
+            ```
+            cargo build --release --locked --bin virtiofsd
+            shasum -a 256 target/release/virtiofsd
+            ```
+
+            An archive hash cannot be reproduced without reproducing the archiving
+            too, which is why the binary hash is published separately.
