@@ -118,7 +118,7 @@ impl ArchOpenFlags {
 
 /// The Linux open flags that have the same value on every architecture this
 /// module knows (`include/uapi/asm-generic/fcntl.h`).
-mod linux {
+pub(crate) mod linux {
     pub const O_ACCMODE: i32 = 0o3;
     pub const O_RDONLY: i32 = 0o0;
     pub const O_WRONLY: i32 = 0o1;
@@ -133,6 +133,10 @@ mod linux {
     pub const O_CLOEXEC: i32 = 0o2000000;
     /// `__O_SYNC | O_DSYNC`: two bits, of which `O_DSYNC` alone is one.
     pub const O_SYNC: i32 = 0o4010000;
+    pub const O_PATH: i32 = 0o10000000;
+    /// One of `O_TMPFILE`'s two bits. The other is `O_DIRECTORY`, whose value
+    /// depends on the architecture.
+    pub const __O_TMPFILE: i32 = 0o20000000;
 }
 
 /// Darwin's open(2) flag values (`<sys/fcntl.h>`).

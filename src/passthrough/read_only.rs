@@ -12,6 +12,7 @@
 #[cfg(target_os = "macos")]
 use crate::libc_compat as libc;
 
+use super::open_flags::linux;
 use super::util::{einval, erofs};
 use super::PassthroughFs;
 use crate::filesystem::{
@@ -97,35 +98,75 @@ const HOST_KEEPS_O_PATH: bool = true;
 const HOST_KEEPS_O_PATH: bool = false;
 
 /// Decide what a read-only share does with the open flags `flags` a guest sent.
+///
+/// The flags are the guest's, in Linux values, so they are checked with Linux values. They used
+/// to be checked with the host's `libc` constants, which on macOS name other bits: Darwin's
+/// `O_EXCL` is Linux's `O_NONBLOCK`, its `O_TRUNC` is `O_APPEND`, its `O_CREAT` is `O_TRUNC`, and
+/// its `O_TMPFILE` is a stand-in defined as 0, which matched every open and refused it.
+///
+/// Each flag read here has the same value on every architecture `open_flags` knows, except
+/// `O_TMPFILE`, which is `__O_TMPFILE` plus the architecture's `O_DIRECTORY`. Only its
+/// `__O_TMPFILE` bit is tested, so the guest's architecture does not matter.
 fn read_only_open(flags: u32, host_keeps_o_path: bool) -> io::Result<ReadOnlyOpen> {
-    let _ = host_keeps_o_path;
-    let cflags: libc::c_int = flags
+    let cflags: i32 = flags
         .try_into()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
-    #[cfg(target_os = "linux")]
-    let o_path = libc::O_PATH;
-    #[cfg(target_os = "macos")]
-    let o_path = libc::O_RDONLY; // O_PATH not available on macOS
-    if cflags & o_path != 0 {
+    // `O_PATH` ignores all flags but `O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW`, just allow it
+    // wholesale -- on a host whose open(2) keeps it. macOS has none: the translation drops it and
+    // would open with the access mode the guest gave, so there the checks below still apply.
+    if host_keeps_o_path && cflags & linux::O_PATH != 0 {
         return Ok(ReadOnlyOpen::Open(flags));
     }
-    if cflags & libc::O_ACCMODE != libc::O_RDONLY {
+
+    if cflags & linux::O_ACCMODE != linux::O_RDONLY {
         return Err(erofs());
     }
-    if cflags & libc::O_EXCL == libc::O_EXCL {
+
+    // Problem: We would like to have an allowlist, not a denylist; `O_LARGEFILE` would be in
+    // that allowlist (and is indeed set by guests), but `libc::O_LARGEFILE == 0`.  The actual
+    // value (in C) can vary between systems (and it seems that it does indeed vary), so we
+    // cannot use an allowlist, and have to live with a denylist only.
+
+    // For what it’s worth, here is what the allowlist would be (for comparison against the
+    // denylist below):
+    // - O_ACCMODE
+    //     -- already checked to be O_RDONLY
+    // - O_APPEND | O_DSYNC | O_SYNC
+    //     -- only affect writes, so useless here, but not harmful
+    // - O_CREAT
+    //     -- special-case below
+    // - O_NOATIME
+    //     -- perfectly OK; in fact, we would rather force-set it, but cannot (see
+    //     --preserve-noatime)
+    // - O_ASYNC | O_CLOEXEC | O_DIRECT | O_DIRECTORY | O_LARGEFILE | O_NOCTTY | O_NOFOLLOW |
+    //   O_NONBLOCK
+    //     -- Don’t have anything to do with writing in particular.
+
+    if cflags & linux::O_EXCL != 0 {
+        // O_EXCL is undefined without O_CREAT (which we filter out below).  Then again, on a
+        // read-only filesystem, O_CREAT | O_EXCL will always return an error, so we can just
+        // do that here.  Maybe we should check whether to return EROFS or EEXIST, depending on
+        // the case, but then again, if someone tries to create a new file on a read-only
+        // filesystem, we can just tell them it’s EROFS.
+        // (And it’s also weird to use O_CREAT | O_EXCL | O_RDONLY.)
         return Err(erofs());
     }
-    if cflags & libc::O_TMPFILE == libc::O_TMPFILE {
+    if cflags & linux::__O_TMPFILE != 0 {
+        // O_TMPFILE | O_RDONLY should have already resulted in EINVAL in the guest, but better
+        // safeguard it explicitly.  `__O_TMPFILE` without `O_DIRECTORY` is EINVAL in Linux too.
         return Err(einval());
     }
-    if cflags & libc::O_TRUNC == libc::O_TRUNC {
+    if cflags & linux::O_TRUNC != 0 {
+        // Undefined with O_RDONLY, so we can do what we want.  We need to error out, though,
+        // lest passing it to the host will truncate the file even with O_RDONLY.
         return Err(einval());
     }
-    if cflags & libc::O_CREAT == 0 {
+
+    if cflags & linux::O_CREAT == 0 {
         Ok(ReadOnlyOpen::Open(flags))
     } else {
-        Ok(ReadOnlyOpen::OpenExisting(flags & !(libc::O_CREAT as u32)))
+        Ok(ReadOnlyOpen::OpenExisting(flags & !(linux::O_CREAT as u32)))
     }
 }
 
