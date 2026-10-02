@@ -174,14 +174,15 @@ pub struct HostOpenFlags {
 /// `O_DIRECT` has no Darwin open flag and is reported in `nocache`. `O_NOATIME`
 /// and `O_LARGEFILE` have no Darwin meaning and are dropped, as is any other bit
 /// this table does not name.
-pub fn linux_to_darwin_open_flags(linux_flags: i32, _guest: GuestArch) -> HostOpenFlags {
-    // The guest's architecture is not consulted yet: every guest is decoded
-    // with the x86_64 values, which is the behaviour being replaced.
-    let arch = GuestArch::X86_64.flags();
+pub fn linux_to_darwin_open_flags(linux_flags: i32, guest: GuestArch) -> HostOpenFlags {
+    let arch = guest.flags();
 
     let mut flags = match linux_flags & linux::O_ACCMODE {
+        linux::O_RDONLY => darwin::O_RDONLY,
         linux::O_WRONLY => darwin::O_WRONLY,
         linux::O_RDWR => darwin::O_RDWR,
+        // The fourth access mode is not one open(2) accepts; read-only is the
+        // conservative reading.
         _ => darwin::O_RDONLY,
     };
 
@@ -203,7 +204,7 @@ pub fn linux_to_darwin_open_flags(linux_flags: i32, _guest: GuestArch) -> HostOp
         }
     }
     // O_SYNC is two bits, one of which is O_DSYNC, so it must match whole.
-    if linux_flags & linux::O_SYNC != 0 {
+    if linux_flags & linux::O_SYNC == linux::O_SYNC {
         flags |= darwin::O_SYNC;
     }
 
@@ -219,8 +220,7 @@ pub fn linux_to_darwin_open_flags(linux_flags: i32, _guest: GuestArch) -> HostOp
 /// architecture is the host's the flags pass through unchanged, bit for bit,
 /// including any this module does not name.
 pub fn linux_to_linux_open_flags(linux_flags: i32, guest: GuestArch, host: GuestArch) -> i32 {
-    // Not consulted yet: a Linux host passes every guest's flags through.
-    if true || guest == host {
+    if guest == host {
         return linux_flags;
     }
     let (from, to) = (guest.flags(), host.flags());

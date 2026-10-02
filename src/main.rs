@@ -28,6 +28,7 @@ use vhost_user_backend::VhostUserDaemon;
 use virtiofsd::filesystem::{FileSystem, SerializableFileSystem};
 use virtiofsd::notify_invalidate;
 use virtiofsd::passthrough::dentry_index::DentryIndex;
+use virtiofsd::passthrough::open_flags::GuestArch;
 use virtiofsd::passthrough::read_only::PassthroughFsRo;
 use virtiofsd::passthrough::{
     self, CachePolicy, InodeFileHandlesMode, MigrationMode, MigrationOnError, NegotiationMode,
@@ -251,6 +252,12 @@ struct Opt {
     /// Honor the O_DIRECT flag passed down by guest applications
     #[arg(long)]
     allow_direct_io: bool,
+
+    /// The architecture of the guest's kernel (x86_64, aarch64). Four open flags have different
+    /// values on each, and the guest sends its own; the default, the host's architecture, is
+    /// right for any guest under hardware virtualization
+    #[arg(long = "guest-arch", default_value_t = GuestArch::HOST, value_name = "x86_64|aarch64")]
+    guest_arch: GuestArch,
 
     /// Print vhost-user.json backend program capabilities and exit
     #[arg(long = "print-capabilities")]
@@ -876,6 +883,7 @@ fn main() {
         readdirplus,
         writeback: opt.writeback,
         allow_direct_io: opt.allow_direct_io,
+        guest_arch: opt.guest_arch,
         killpriv_v2,
         security_label: opt.security_label,
         posix_acl: opt.posix_acl,

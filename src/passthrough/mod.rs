@@ -29,12 +29,12 @@ use crate::passthrough::device_state::preserialization::{
 use crate::passthrough::inode_store::{
     Inode, InodeData, InodeFile, InodeIds, InodeStore, StrongInodeReference,
 };
-use crate::passthrough::open_flags::GuestArch;
+use crate::passthrough::open_flags::{translate_linux_open_flags, GuestArch, HostOpenFlags};
 #[cfg(target_os = "macos")]
 use crate::passthrough::util::get_path_by_fd;
 use crate::passthrough::util::{
     ebadf, is_safe_inode, openat, openat_verbose, reopen_fd_through_proc,
-    translate_linux_open_flags, translate_linux_seek_whence,
+    translate_linux_seek_whence,
 };
 use crate::read_dir::ReadDir;
 use crate::soft_idmap::{self, GuestGid, GuestUid, HostGid, HostUid, Id, IdMap};
@@ -1147,15 +1147,46 @@ impl PassthroughFs {
         })
     }
 
+    /// Translate the open flags a guest sent into this host's.
+    fn guest_open_flags(&self, flags: u32) -> HostOpenFlags {
+        translate_linux_open_flags(flags as i32, self.cfg.guest_arch)
+    }
+
+    /// Turn the host's page cache off for `file` if the guest opened it with `O_DIRECT` and this
+    /// host's open(2) cannot say so (`nocache`). Like `O_DIRECT` itself in `open_inode`, it is
+    /// only honoured with `allow_direct_io`, and only for regular files.
+    #[cfg(target_os = "macos")]
+    fn apply_nocache(&self, file: &impl AsRawFd, regular: bool, nocache: bool) -> io::Result<()> {
+        if !nocache || !self.cfg.allow_direct_io || !regular {
+            return Ok(());
+        }
+        // Safe because this only sets a flag on a descriptor we own.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// On Linux `O_DIRECT` stays in the open flags, so there is nothing to do after the open.
+    #[cfg(target_os = "linux")]
+    fn apply_nocache(
+        &self,
+        _file: &impl AsRawFd,
+        _regular: bool,
+        _nocache: bool,
+    ) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// `flags` are the host's, already translated from the guest's by `guest_open_flags()`.
     fn do_open(
         &self,
         inode: Inode,
         kill_priv: bool,
-        flags: u32,
+        flags: HostOpenFlags,
     ) -> io::Result<(Option<Handle>, OpenOptions)> {
-        // The guest kernel sends open flags using Linux numeric values.
-        // Translate them to native (macOS) values before any further processing.
-        let mut flags = translate_linux_open_flags(flags as i32) as u32;
+        let HostOpenFlags { flags, nocache } = flags;
+        let mut flags = flags as u32;
 
         // We need to clean the `O_APPEND` flag in case the file is mem mapped or if the flag
         // is later modified in the guest using `fcntl(F_SETFL)`. We do a per-write `O_APPEND`
@@ -1178,6 +1209,7 @@ impl PassthroughFs {
             };
             self.open_inode(&inode_data, flags as i32)?
         };
+        self.apply_nocache(&file, file_type.is_regular_file(), nocache)?;
 
         if flags & (libc::O_TRUNC as u32) != 0 {
             self.clear_file_capabilities(file.as_raw_fd(), file_type, false)?;
@@ -1410,13 +1442,10 @@ impl PassthroughFs {
         parent_file: &InodeFile,
         name: &CStr,
         mode: u32,
-        flags: u32,
+        flags: i32,
         umask: u32,
         extensions: Extensions,
     ) -> io::Result<RawFd> {
-        // Translate Linux open flags from the guest to native flags
-        let native_flags = translate_linux_open_flags(flags as i32);
-
         let fd = {
             let _credentials_guard = self.unix_credentials_guard(ctx, &extensions)?;
             let _umask_guard = self
@@ -1429,7 +1458,7 @@ impl PassthroughFs {
             self.open_relative_to(
                 parent_file,
                 name,
-                native_flags | libc::O_CREAT | libc::O_EXCL,
+                flags | libc::O_CREAT | libc::O_EXCL,
                 mode.into(),
             )?
         };
@@ -1925,11 +1954,11 @@ impl FileSystem for PassthroughFs {
         inode: Inode,
         flags: u32,
     ) -> io::Result<(Option<Handle>, OpenOptions)> {
-        // Use the Linux O_DIRECTORY value (0o200000) since do_open() translates
-        // Linux flags to native flags. Adding the macOS constant here would be
-        // incorrectly translated.
-        const LINUX_O_DIRECTORY: u32 = 0o200000;
-        self.do_open(inode, false, flags | LINUX_O_DIRECTORY)
+        // O_DIRECTORY is added after translating, in the host's own value: the guest's value
+        // depends on its architecture.
+        let mut flags = self.guest_open_flags(flags);
+        flags.flags |= libc::O_DIRECTORY;
+        self.do_open(inode, false, flags)
     }
 
     fn releasedir(
@@ -2035,7 +2064,7 @@ impl FileSystem for PassthroughFs {
         kill_priv: bool,
         flags: u32,
     ) -> io::Result<(Option<Handle>, OpenOptions)> {
-        self.do_open(inode, kill_priv, flags)
+        self.do_open(inode, kill_priv, self.guest_open_flags(flags))
     }
 
     fn release(
@@ -2065,10 +2094,14 @@ impl FileSystem for PassthroughFs {
         let data = self.inodes.get(parent).ok_or_else(ebadf)?;
         let parent_file = data.get_file()?;
 
+        // Everything below works in the host's flag values.
+        let host_flags = self.guest_open_flags(flags);
+        let flags = host_flags.flags;
+
         // We need to clean the `O_APPEND` flag in case the file is mem mapped or if the flag
         // is later modified in the guest using `fcntl(F_SETFL)`. We do a per-write `O_APPEND`
         // check setting `RWF_APPEND` for non-mmapped writes, if necessary.
-        let create_flags = flags & !(libc::O_APPEND as u32);
+        let create_flags = flags & !libc::O_APPEND;
         let fd = self.do_create(
             &ctx,
             &parent_file,
@@ -2084,7 +2117,7 @@ impl FileSystem for PassthroughFs {
                 // Ignore the error if the file exists and O_EXCL is not present in `flags`
                 match last_error.kind() {
                     io::ErrorKind::AlreadyExists => {
-                        if (flags as i32 & libc::O_EXCL) != 0 {
+                        if (flags & libc::O_EXCL) != 0 {
                             return Err(last_error);
                         }
                     }
@@ -2092,7 +2125,7 @@ impl FileSystem for PassthroughFs {
                 }
 
                 let entry = self.do_lookup(parent, name)?;
-                let (handle, _) = self.do_open(entry.inode, kill_priv, flags)?;
+                let (handle, _) = self.do_open(entry.inode, kill_priv, host_flags)?;
                 let handle = handle.ok_or_else(ebadf)?;
 
                 (entry, handle)
@@ -2100,6 +2133,8 @@ impl FileSystem for PassthroughFs {
             Ok(fd) => {
                 // Safe because we just opened this fd.
                 let file = unsafe { File::from_raw_fd(fd) };
+                // CREATE only ever makes a regular file.
+                self.apply_nocache(&file, true, host_flags.nocache)?;
 
                 let entry = self.do_lookup(parent, name)?;
 
@@ -2108,7 +2143,7 @@ impl FileSystem for PassthroughFs {
                     inode: entry.inode,
                     file: self.guest_fds.allocate(file)?.into(),
                     file_type: FileType::from_mode(mode),
-                    migration_info: HandleMigrationInfo::new(flags as i32),
+                    migration_info: HandleMigrationInfo::new(flags),
                 };
 
                 self.handles.write().unwrap().insert(handle, Arc::new(data));

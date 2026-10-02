@@ -858,8 +858,11 @@ fn a_guest_creates_a_file_with_o_direct() {
     }
 }
 
-/// `O_EXCL` was tested against the guest's flags with Darwin's value, which is
-/// Linux's `O_NONBLOCK`, so a create of an existing file opened it instead.
+/// `create` used to test `O_EXCL` in the guest's raw flags with Darwin's value,
+/// which is Linux's `O_NONBLOCK`, and so missed it. The reopen that followed
+/// still carried `O_CREAT | O_EXCL` and failed with `EEXIST`, so the answer was
+/// right by accident. Now that the check reads the host's flags, this keeps the
+/// answer right on purpose.
 #[test]
 fn create_with_o_excl_refuses_an_existing_file() {
     for arch in GUEST_ARCHES {
