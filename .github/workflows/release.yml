@@ -242,12 +242,34 @@ jobs:
     name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
+    # A job's permissions replace the workflow's, so contents: write is repeated.
+    # id-token signs the attestation with this workflow's OIDC identity, and
+    # attestations stores it against the repository. See "Attest".
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
+      # The Homebrew tap's verify-release.sh refuses an archive without this: a
+      # build-provenance attestation, signed as THIS workflow, for the exact bytes
+      # users download. SHA256SUMS only says a file has not changed since it was
+      # uploaded; the attestation says which workflow built it, in which
+      # repository, from which commit. It is checked with
+      # `gh attestation verify --signer-workflow christhomas/virtiofsd/.github/workflows/release.yml`.
+      #
+      # The archives were built by the jobs above and only handed over as
+      # artifacts, within this same run. The attestation names the run, so it
+      # covers what that run built.
+      - name: Attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/virtiofsd-*.tar.gz
 
       - name: Build SHA256SUMS
         shell: bash
@@ -337,6 +359,14 @@ jobs:
 
             `SHA256SUMS` covers the archives — check a download with
             `shasum -a 256 -c SHA256SUMS`.
+
+            Each archive also carries a build-provenance attestation signed by this
+            repository's release workflow. Check that the archive was built by it with
+
+            ```
+            gh attestation verify <archive> --repo christhomas/virtiofsd \
+              --signer-workflow christhomas/virtiofsd/.github/workflows/release.yml
+            ```
 
             `binaries.txt` covers the binary *inside* each archive, and records the
             exact compiler each was built with. Every line was verified on the runner
