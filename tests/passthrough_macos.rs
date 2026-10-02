@@ -26,6 +26,7 @@ use virtiofsd::filesystem::{
 use virtiofsd::fuse::{FsOptions, ROOT_ID};
 use virtiofsd::oslib::{ReadvFlags, WritevFlags};
 use virtiofsd::passthrough::open_flags::GuestArch;
+use virtiofsd::passthrough::read_only::PassthroughFsRo;
 use virtiofsd::passthrough::{Config, InodeFileHandlesMode, PassthroughFs};
 use virtiofsd::soft_idmap::{GuestGid, GuestUid};
 
@@ -893,5 +894,148 @@ fn create_with_o_excl_refuses_an_existing_file() {
             Some(libc::EEXIST),
             "{arch} guest: {err}"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// --readonly checks the guest's open flags with Linux values
+// ---------------------------------------------------------------------------
+
+// Open flags common to every Linux architecture (`asm-generic/fcntl.h`).
+const LINUX_O_WRONLY: u32 = 0o1;
+const LINUX_O_RDWR: u32 = 0o2;
+const LINUX_O_TRUNC: u32 = 0o1000;
+const LINUX_O_APPEND: u32 = 0o2000;
+const LINUX_O_NONBLOCK: u32 = 0o4000;
+
+/// A `--readonly` share of a temp dir holding `file` with `CONTENT`, for a guest of `arch`.
+fn setup_read_only(guest_arch: GuestArch) -> (TempDir, PassthroughFsRo) {
+    let dir = TempDir::new().expect("create temp dir");
+    fs::write(dir.path().join("file"), CONTENT).unwrap();
+    let cfg = Config {
+        root_dir: dir.path().to_str().expect("temp path is utf-8").to_string(),
+        inode_file_handles: InodeFileHandlesMode::Never,
+        guest_arch,
+        ..Default::default()
+    };
+    let fs = PassthroughFsRo::new(cfg).expect("PassthroughFsRo::new");
+    fs.init(FsOptions::empty()).expect("fs.init");
+    (dir, fs)
+}
+
+const CONTENT: &[u8] = b"read-only content";
+
+fn lookup_ro(fs: &PassthroughFsRo, name: &str) -> u64 {
+    fs.lookup(current_ctx(), ROOT_ID, cstr(name).as_c_str())
+        .unwrap_or_else(|e| panic!("lookup {:?} failed: {}", name, e))
+        .inode
+}
+
+/// Every open on a `--readonly` share failed with `EINVAL`: `O_TMPFILE` is a stand-in defined as
+/// 0 on macOS, and `flags & 0 == 0` held for any flags. The guest's `O_NONBLOCK` is Darwin's
+/// `O_EXCL`, and its `O_APPEND` Darwin's `O_TRUNC`, so these were refused even past that.
+#[test]
+fn a_read_only_share_opens_an_existing_file() {
+    for arch in GUEST_ARCHES {
+        let (direct, largefile, directory) = guest_flags(arch);
+        let (_dir, fs) = setup_read_only(arch);
+        let ctx = current_ctx();
+        let inode = lookup_ro(&fs, "file");
+
+        for extra in [0, LINUX_O_NONBLOCK, LINUX_O_APPEND, direct] {
+            let flags = libc::O_RDONLY as u32 | largefile | extra;
+            let (handle, _) = fs
+                .open(ctx, inode, false, flags)
+                .unwrap_or_else(|e| panic!("{} guest: open {:#o} failed: {}", arch, flags, e));
+            let handle = handle.expect("open returned a handle");
+            let mut writer = VecWriter { data: Vec::new() };
+            fs.read(ctx, inode, handle, &mut writer, 4096, 0, None, 0)
+                .unwrap_or_else(|e| panic!("{} guest: read failed: {}", arch, e));
+            assert_eq!(writer.data, CONTENT, "{arch} guest: {flags:#o}");
+            fs.release(ctx, inode, 0, handle, false, false, None).ok();
+        }
+
+        let (handle, _) = fs
+            .opendir(ctx, ROOT_ID, directory | largefile)
+            .unwrap_or_else(|e| panic!("{} guest: opendir failed: {}", arch, e));
+        fs.releasedir(ctx, ROOT_ID, 0, handle.expect("opendir returned a handle"))
+            .unwrap();
+    }
+}
+
+/// The guest's `O_TRUNC` is Darwin's `O_CREAT`. Read with Darwin's values, a read-only open with
+/// it would have been let through, and the host's open would have truncated the file.
+#[test]
+fn a_read_only_share_refuses_writes_and_truncation() {
+    for arch in GUEST_ARCHES {
+        let (_, largefile, _) = guest_flags(arch);
+        let (dir, fs) = setup_read_only(arch);
+        let ctx = current_ctx();
+        let inode = lookup_ro(&fs, "file");
+
+        let cases = [
+            (LINUX_O_WRONLY, libc::EROFS),
+            (LINUX_O_RDWR, libc::EROFS),
+            (LINUX_O_EXCL, libc::EROFS),
+            (LINUX_O_TRUNC, libc::EINVAL),
+        ];
+        for (flags, expected) in cases {
+            let err = fs
+                .open(ctx, inode, false, flags | largefile)
+                .err()
+                .unwrap_or_else(|| panic!("{} guest: open {:#o} succeeded", arch, flags));
+            assert_eq!(
+                err.raw_os_error(),
+                Some(expected),
+                "{arch} guest: {flags:#o}"
+            );
+        }
+        assert_eq!(
+            fs::read(dir.path().join("file")).unwrap(),
+            CONTENT,
+            "{arch} guest"
+        );
+    }
+}
+
+/// `create` opens a file that exists and refuses one that does not, without creating it.
+#[test]
+fn a_read_only_share_creates_nothing() {
+    for arch in GUEST_ARCHES {
+        let (_, largefile, _) = guest_flags(arch);
+        let (dir, fs) = setup_read_only(arch);
+        let ctx = current_ctx();
+        let flags = libc::O_RDONLY as u32 | LINUX_O_CREAT | largefile;
+        let create = |name: &str| {
+            fs.create(
+                ctx,
+                ROOT_ID,
+                cstr(name).as_c_str(),
+                0o644,
+                false,
+                flags,
+                0,
+                Extensions::default(),
+            )
+        };
+
+        let (entry, handle, _) = create("file")
+            .unwrap_or_else(|e| panic!("{} guest: create of an existing file: {}", arch, e));
+        fs.release(
+            ctx,
+            entry.inode,
+            0,
+            handle.expect("a handle"),
+            false,
+            false,
+            None,
+        )
+        .ok();
+
+        let err = create("missing")
+            .err()
+            .unwrap_or_else(|| panic!("{} guest: create of a missing file succeeded", arch));
+        assert_eq!(err.raw_os_error(), Some(libc::EROFS), "{arch} guest: {err}");
+        assert!(!dir.path().join("missing").exists(), "{arch} guest");
     }
 }
