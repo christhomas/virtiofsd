@@ -150,7 +150,18 @@ Print vhost-user.json backend program capabilities and exit.
 ```shell
 --allow-direct-io
 ```
-Honor the `O_DIRECT` flag passed down by guest applications.
+Honor the `O_DIRECT` flag passed down by guest applications. macOS has no
+`O_DIRECT` open flag, so on a macOS host the file is opened without it and
+the page cache is turned off for it with `F_NOCACHE`.
+
+```shell
+--guest-arch=x86_64|aarch64
+```
+The architecture of the guest's kernel. The guest sends its open flags in its
+own architecture's Linux values, and four of them (`O_DIRECTORY`,
+`O_NOFOLLOW`, `O_DIRECT`, `O_LARGEFILE`) differ between x86_64 and aarch64.
+Default: the host's architecture, which is right for any guest under hardware
+virtualization. Set it for an emulated guest of another architecture.
 
 ```shell
 --announce-submounts

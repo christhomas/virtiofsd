@@ -25,6 +25,7 @@ use virtiofsd::filesystem::{
 };
 use virtiofsd::fuse::{FsOptions, ROOT_ID};
 use virtiofsd::oslib::{ReadvFlags, WritevFlags};
+use virtiofsd::passthrough::open_flags::GuestArch;
 use virtiofsd::passthrough::{Config, InodeFileHandlesMode, PassthroughFs};
 use virtiofsd::soft_idmap::{GuestGid, GuestUid};
 
@@ -731,4 +732,166 @@ fn large_write_read_128k() {
     assert_eq!(writer.data, pattern, "128k roundtrip must be byte-exact");
 
     fs.release(ctx, inode, 0, handle, false, false, None).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Guest open flags are decoded with the guest architecture's Linux values
+// ---------------------------------------------------------------------------
+
+// Open flags common to every Linux architecture.
+const LINUX_O_CREAT: u32 = 0o100;
+const LINUX_O_EXCL: u32 = 0o200;
+
+/// The values of `O_DIRECT`, `O_LARGEFILE` and `O_DIRECTORY` a guest of `arch`
+/// sends (`arch/arm64/include/uapi/asm/fcntl.h`, `asm-generic/fcntl.h`). A 64-bit
+/// guest kernel adds `O_LARGEFILE` to every open.
+fn guest_flags(arch: GuestArch) -> (u32, u32, u32) {
+    match arch {
+        GuestArch::X86_64 => (0o40000, 0o100000, 0o200000),
+        GuestArch::Aarch64 => (0o200000, 0o400000, 0o40000),
+    }
+}
+
+const GUEST_ARCHES: [GuestArch; 2] = [GuestArch::X86_64, GuestArch::Aarch64];
+
+fn setup_guest(guest_arch: GuestArch, allow_direct_io: bool) -> (TempDir, PassthroughFs) {
+    let dir = TempDir::new().expect("create temp dir");
+    let cfg = Config {
+        root_dir: dir.path().to_str().expect("temp path is utf-8").to_string(),
+        inode_file_handles: InodeFileHandlesMode::Never,
+        guest_arch,
+        allow_direct_io,
+        ..Default::default()
+    };
+    let fs = PassthroughFs::new(cfg).expect("PassthroughFs::new");
+    fs.init(FsOptions::empty()).expect("fs.init");
+    (dir, fs)
+}
+
+/// The open `xfs_repair -n` makes. An arm64 guest's `O_DIRECT` is x86_64's
+/// `O_DIRECTORY`, and decoding it as such failed this open with `ENOTDIR`.
+#[test]
+fn a_guest_opens_a_regular_file_with_o_direct() {
+    for arch in GUEST_ARCHES {
+        let (direct, largefile, _) = guest_flags(arch);
+        for allow_direct_io in [false, true] {
+            let what = format!("{arch} guest, allow_direct_io={allow_direct_io}");
+            let (dir, fs) = setup_guest(arch, allow_direct_io);
+            fs::write(dir.path().join("x.img"), b"image").unwrap();
+            let ctx = current_ctx();
+            let inode = lookup_inode(&fs, ROOT_ID, "x.img");
+
+            let (handle, _) = fs
+                .open(
+                    ctx,
+                    inode,
+                    false,
+                    libc::O_RDONLY as u32 | direct | largefile,
+                )
+                .unwrap_or_else(|e| panic!("{}: O_RDONLY|O_DIRECT open failed: {}", what, e));
+            let handle = handle.expect("open returned a handle");
+
+            let mut writer = VecWriter { data: Vec::new() };
+            fs.read(ctx, inode, handle, &mut writer, 4096, 0, None, 0)
+                .unwrap_or_else(|e| panic!("{}: read failed: {}", what, e));
+            assert_eq!(writer.data, b"image", "{what}");
+            fs.release(ctx, inode, 0, handle, false, false, None).ok();
+        }
+    }
+}
+
+/// The guest's own `O_DIRECTORY` is honoured: a directory opens, and a regular
+/// file is refused with `ENOTDIR`.
+#[test]
+fn a_guest_o_directory_is_decoded() {
+    for arch in GUEST_ARCHES {
+        let (_, largefile, directory) = guest_flags(arch);
+        let (dir, fs) = setup_guest(arch, false);
+        fs::create_dir(dir.path().join("d")).unwrap();
+        fs::write(dir.path().join("f"), b"").unwrap();
+        let ctx = current_ctx();
+
+        let d = lookup_inode(&fs, ROOT_ID, "d");
+        let (handle, _) = fs
+            .opendir(ctx, d, directory | largefile)
+            .unwrap_or_else(|e| panic!("{} guest: opendir failed: {}", arch, e));
+        fs.releasedir(ctx, d, 0, handle.expect("opendir returned a handle"))
+            .unwrap();
+
+        let f = lookup_inode(&fs, ROOT_ID, "f");
+        let err = fs
+            .open(ctx, f, false, directory | largefile)
+            .err()
+            .unwrap_or_else(|| panic!("{} guest: O_DIRECTORY open of a file succeeded", arch));
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::ENOTDIR),
+            "{arch} guest: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_guest_creates_a_file_with_o_direct() {
+    for arch in GUEST_ARCHES {
+        let (direct, largefile, _) = guest_flags(arch);
+        let (dir, fs) = setup_guest(arch, true);
+        let ctx = current_ctx();
+        let flags = libc::O_RDWR as u32 | LINUX_O_CREAT | direct | largefile;
+
+        let (entry, handle, _) = fs
+            .create(
+                ctx,
+                ROOT_ID,
+                cstr("new.img").as_c_str(),
+                0o644,
+                false,
+                flags,
+                0,
+                Extensions::default(),
+            )
+            .unwrap_or_else(|e| panic!("{} guest: create failed: {}", arch, e));
+        assert!(dir.path().join("new.img").is_file(), "{} guest", arch);
+        let handle = handle.expect("create returned a handle");
+        fs.release(ctx, entry.inode, 0, handle, false, false, None)
+            .ok();
+    }
+}
+
+/// `create` used to test `O_EXCL` in the guest's raw flags with Darwin's value,
+/// which is Linux's `O_NONBLOCK`, and so missed it. The reopen that followed
+/// still carried `O_CREAT | O_EXCL` and failed with `EEXIST`, so the answer was
+/// right by accident. Now that the check reads the host's flags, this keeps the
+/// answer right on purpose.
+#[test]
+fn create_with_o_excl_refuses_an_existing_file() {
+    for arch in GUEST_ARCHES {
+        let (dir, fs) = setup_guest(arch, false);
+        fs::write(dir.path().join("exists"), b"").unwrap();
+        let flags = libc::O_RDWR as u32 | LINUX_O_CREAT | LINUX_O_EXCL;
+
+        let err = fs
+            .create(
+                current_ctx(),
+                ROOT_ID,
+                cstr("exists").as_c_str(),
+                0o644,
+                false,
+                flags,
+                0,
+                Extensions::default(),
+            )
+            .err()
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} guest: O_EXCL create of an existing file succeeded",
+                    arch
+                )
+            });
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::EEXIST),
+            "{arch} guest: {err}"
+        );
+    }
 }
