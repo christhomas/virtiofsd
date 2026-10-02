@@ -190,13 +190,16 @@ jobs:
           echo "sha256=${sum}" >> "$GITHUB_OUTPUT"
           # Single space between hash and name, so the file is easy to read and to
           # parse. The name matches the published archive minus its extension.
+          #
+          # Both files go in dist/, beside the archive, so the artifact holds the
+          # three of them at its top level. See the upload step for why.
           echo "${sum} virtiofsd-${{ steps.ver.outputs.version }}-${{ matrix.artifact }}" \
-            > "checksum-${{ matrix.artifact }}.txt"
+            > "dist/checksum-${{ matrix.artifact }}.txt"
           # Record the exact compiler, because "same source" only implies "same
           # bytes" for a given toolchain. Without this a verifier cannot know which
           # rustc to use, which makes the checksum unfalsifiable rather than proven.
-          rustc --version > "toolchain-${{ matrix.artifact }}.txt"
-          cat "checksum-${{ matrix.artifact }}.txt" "toolchain-${{ matrix.artifact }}.txt"
+          rustc --version > "dist/toolchain-${{ matrix.artifact }}.txt"
+          cat "dist/checksum-${{ matrix.artifact }}.txt" "dist/toolchain-${{ matrix.artifact }}.txt"
 
       # Prove the claim rather than asserting it: wipe the build directory, rebuild
       # from this same commit on this same runner, and require the binary to be
@@ -231,10 +234,17 @@ jobs:
           # The checksum and toolchain files travel with the archive so the release
           # job can assemble them into one provenance file. Each build runs on a
           # different runner, so this is the only way they meet.
+          #
+          # All three paths are in dist/. upload-artifact stores files relative to
+          # the paths' common ancestor: when the two text files sat at the top of
+          # the workspace, that ancestor was the workspace, the archive was stored
+          # as dist/<archive>, and the release job's download into dist/ put it at
+          # dist/dist/<archive>, where nothing found it. v1.14.0's first release
+          # run failed exactly so.
           path: |
             dist/*.tar.gz
-            checksum-${{ matrix.artifact }}.txt
-            toolchain-${{ matrix.artifact }}.txt
+            dist/checksum-${{ matrix.artifact }}.txt
+            dist/toolchain-${{ matrix.artifact }}.txt
           if-no-files-found: error
           retention-days: 1
 
@@ -255,6 +265,25 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+
+      # Every later step reads dist/ by glob, and a glob that matches nothing is
+      # an absence no step reports clearly. Count what arrived, by name, against
+      # the build matrix: one archive, one checksum and one toolchain file each.
+      - name: Every build's files arrived where the steps below read them
+        shell: bash
+        run: |
+          set -euo pipefail
+          find dist -type f | sort
+          fail=0
+          for a in darwin-arm64 darwin-x86_64 linux-x86_64; do
+            for f in "dist/virtiofsd-"*"-${a}.tar.gz" "dist/checksum-${a}.txt" "dist/toolchain-${a}.txt"; do
+              if [ ! -f "$f" ]; then
+                echo "::error::missing ${f} (the ${a} build's files are not at the top of dist/)" >&2
+                fail=1
+              fi
+            done
+          done
+          [ "$fail" = 0 ]
 
       # The Homebrew tap's verify-release.sh refuses an archive without this: a
       # build-provenance attestation, signed as THIS workflow, for the exact bytes
