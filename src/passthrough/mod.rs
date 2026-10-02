@@ -12,6 +12,7 @@ pub mod file_handle;
 mod guest_fd_limit;
 pub mod inode_store;
 pub mod mount_fd;
+pub mod open_flags;
 pub mod read_only;
 pub mod stat;
 pub mod util;
@@ -28,6 +29,7 @@ use crate::passthrough::device_state::preserialization::{
 use crate::passthrough::inode_store::{
     Inode, InodeData, InodeFile, InodeIds, InodeStore, StrongInodeReference,
 };
+use crate::passthrough::open_flags::GuestArch;
 #[cfg(target_os = "macos")]
 use crate::passthrough::util::get_path_by_fd;
 use crate::passthrough::util::{
@@ -401,6 +403,12 @@ pub struct Config {
     /// The default is `false`.
     pub allow_direct_io: bool,
 
+    /// The architecture of the guest's Linux kernel. The open flags a guest sends are in its own
+    /// architecture's values, and four of them differ between x86_64 and aarch64.
+    ///
+    /// The default is the host's own architecture.
+    pub guest_arch: GuestArch,
+
     /// If `killpriv_v2` is true then it indicates that the file system is expected to clear the
     /// setuid and setgid bits.
     pub killpriv_v2: bool,
@@ -491,6 +499,7 @@ impl Default for Config {
             inode_file_handles: Default::default(),
             readdirplus: true,
             allow_direct_io: false,
+            guest_arch: GuestArch::HOST,
             killpriv_v2: false,
             posix_acl: NegotiationMode::Never,
             security_label: NegotiationMode::Never,

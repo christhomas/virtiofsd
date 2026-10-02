@@ -68,6 +68,11 @@ jobs:
         include:
           - runner: ubuntu-latest
             artifact: linux-x86_64
+          # aarch64 Linux checks the arm64 open-flag table against the host's
+          # own libc values (passthrough::open_flags), as x86_64 does for the
+          # generic one.
+          - runner: ubuntu-24.04-arm
+            artifact: linux-arm64
           - runner: macos-15
             artifact: darwin-arm64
           - runner: macos-15-intel
@@ -83,4 +88,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y -qq libseccomp-dev libcap-ng-dev
-      - run: cargo test
+      # --no-fail-fast so a failure in the unit tests does not stop the
+      # integration tests (tests/passthrough_macos.rs) from running and
+      # reporting too.
+      - run: cargo test --no-fail-fast
