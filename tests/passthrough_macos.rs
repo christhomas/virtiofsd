@@ -1039,3 +1039,75 @@ fn a_read_only_share_creates_nothing() {
         assert!(!dir.path().join("missing").exists(), "{arch} guest");
     }
 }
+
+// ---------------------------------------------------------------------------
+// A hard-linked file opens under its remaining name (christhomas/virtiofsd#9)
+//
+// The inode's fd is opened through the name the guest first looked it up by.
+// Opening the inode reopens that fd by path; once that name is gone, or names
+// another file, the path no longer leads to this inode although it still
+// exists under its other link.
+// ---------------------------------------------------------------------------
+
+/// Read up to 64 bytes from `inode` through a fresh read-only open.
+fn open_and_read(fs: &PassthroughFs, inode: u64) -> io::Result<Vec<u8>> {
+    let ctx = current_ctx();
+    let (handle_opt, _opts) = fs.open(ctx, inode, false, libc::O_RDONLY as u32)?;
+    let handle = handle_opt.expect("open returned a handle");
+    let mut writer = VecWriter { data: Vec::new() };
+    let read = fs.read(ctx, inode, handle, &mut writer, 64, 0, None, 0);
+    fs.release(ctx, inode, 0, handle, false, false, None).ok();
+    read?;
+    Ok(writer.data)
+}
+
+/// Look up `a`, hard-link it as `b`, and return the inode both names share.
+fn link_a_as_b(fs: &PassthroughFs) -> u64 {
+    let ctx = current_ctx();
+    let inode = lookup_inode(fs, ROOT_ID, "a");
+    let entry = fs
+        .link(ctx, inode, ROOT_ID, cstr("b").as_c_str())
+        .expect("link a b");
+    assert_eq!(entry.inode, inode, "a and b must share one inode");
+    let b = lookup_inode(fs, ROOT_ID, "b");
+    assert_eq!(b, inode, "lookup of b must return the inode of a");
+    inode
+}
+
+#[test]
+fn a_hard_link_opens_after_the_first_name_is_unlinked() {
+    let (dir, fs) = setup();
+    fs::write(dir.path().join("a"), [0u8; 6]).unwrap();
+    let inode = link_a_as_b(&fs);
+
+    fs.unlink(current_ctx(), ROOT_ID, cstr("a").as_c_str())
+        .expect("unlink a");
+
+    let data = open_and_read(&fs, inode).expect("open b after a is unlinked");
+    assert_eq!(data, [0u8; 6], "b must read the 6 bytes written to a");
+}
+
+#[test]
+fn a_hard_link_opens_its_own_file_after_another_is_renamed_over_the_first_name() {
+    let (dir, fs) = setup();
+    fs::write(dir.path().join("a"), b"linked").unwrap();
+    fs::write(dir.path().join("c"), b"other file").unwrap();
+    let inode = link_a_as_b(&fs);
+
+    fs.rename(
+        current_ctx(),
+        ROOT_ID,
+        cstr("c").as_c_str(),
+        ROOT_ID,
+        cstr("a").as_c_str(),
+        0,
+    )
+    .expect("rename c over a");
+
+    let data = open_and_read(&fs, inode).expect("open b after c replaces a");
+    assert_eq!(
+        String::from_utf8_lossy(&data),
+        "linked",
+        "b must read its own file, not the one now named a"
+    );
+}
