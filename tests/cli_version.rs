@@ -45,17 +45,28 @@ fn port_version_prints_the_release_version_alone() {
 
 #[test]
 fn port_version_is_the_upstream_version_with_an_optional_revision() {
+    // The release workflow takes vMAJOR.MINOR.PATCH, an optional .REVISION and an optional
+    // -prerelease suffix, and requires PORT_VERSION to equal the tag without its "v".
     let port = PORT_VERSION_FILE.trim();
     let upstream = env!("CARGO_PKG_VERSION");
-    let ok = port == upstream
-        || port
+    let (release, pre) = match port.split_once('-') {
+        Some((release, pre)) => (release, Some(pre)),
+        None => (port, None),
+    };
+    let release_ok = release == upstream
+        || release
             .strip_prefix(upstream)
             .and_then(|rest| rest.strip_prefix('.'))
             .is_some_and(|rev| !rev.is_empty() && rev.bytes().all(|b| b.is_ascii_digit()));
+    let pre_ok = pre.is_none_or(|pre| {
+        !pre.is_empty() && pre.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
+    });
     assert!(
-        ok,
-        "PORT_VERSION {:?} must be Cargo.toml's {} or {}.N",
-        port, upstream, upstream
+        release_ok && pre_ok,
+        "PORT_VERSION {:?} must be Cargo.toml's {} or {}.N, optionally with a -prerelease suffix",
+        port,
+        upstream,
+        upstream
     );
 }
 
