@@ -182,13 +182,15 @@ pub fn reopen_fd_through_proc(
 /// still exists under another hard link: once it is unlinked, `F_GETPATH` fails
 /// with `ENOENT`, and once another file is renamed over it, `F_GETPATH` still
 /// returns it, so it opens the other file. So every path is checked to name the
-/// same `(st_dev, st_ino)` as `fd`, before it is opened (the flags may truncate)
-/// and again after. When the `F_GETPATH` path fails, the file is looked up by
+/// same `(st_dev, st_ino)` as `fd` before it is opened and again on the fd the
+/// open returns. When the `F_GETPATH` path fails, the file is looked up by
 /// its identity instead, with `fsgetpath(2)`: the volume's fsid and the inode
 /// number give one of the file's current paths, whichever link it is.
 ///
-/// What remains is the window between the check and the `open()` of the same
-/// path, which the check after the open closes for everything but `O_TRUNC`.
+/// The open itself can do nothing the identity check would come too late for:
+/// it never truncates (`O_TRUNC` is applied to the checked fd afterwards) and
+/// never waits (it adds `O_NONBLOCK`, so a FIFO renamed over the path in the
+/// meantime cannot block it).
 #[cfg(target_os = "macos")]
 pub fn reopen_fd_through_proc(
     fd: &impl AsRawFd,
@@ -232,7 +234,7 @@ mod macos_reopen {
     use std::fs::File;
     use std::io;
     use std::mem::MaybeUninit;
-    use std::os::unix::io::{FromRawFd, RawFd};
+    use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
     extern "C" {
         // <sys/fsgetpath.h>, macOS 10.13 and later. Not bound by the libc crate.
@@ -302,8 +304,12 @@ mod macos_reopen {
         io::Error::from_raw_os_error(libc::ENOENT)
     }
 
-    /// Open `path` with `flags` only if it names the file `want` describes, checking before the
-    /// open, since `flags` may truncate, and after it, in case the name changed in between.
+    /// Open `path` with `flags` only if it names the file `want` describes.
+    ///
+    /// The path is checked before the open, and the fd the open returns is checked again, in case
+    /// the name changed in between. Until that second check passes, nothing may happen that
+    /// cannot be undone or that can wait: the open adds `O_NONBLOCK`, so a FIFO renamed over the
+    /// path cannot block it, and leaves out `O_TRUNC`, which is applied only to the checked fd.
     pub(super) fn open_same_file(
         path: &CStr,
         flags: libc::c_int,
@@ -320,12 +326,50 @@ mod macos_reopen {
             return Err(not_same_file());
         }
 
+        let file = open_checked(path, (flags & !libc::O_TRUNC) | libc::O_NONBLOCK, want)?;
+
+        if flags & libc::O_TRUNC != 0 {
+            // open(2) truncates under O_RDONLY too, given write permission, but ftruncate(2)
+            // needs an fd open for writing. A second checked fd, opened only for writing, asks
+            // for the same permission and truncates the same file.
+            let writable;
+            let target = if flags & libc::O_ACCMODE == libc::O_RDONLY {
+                writable = open_checked(
+                    path,
+                    libc::O_WRONLY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+                    want,
+                )?;
+                &writable
+            } else {
+                &file
+            };
+            // Safe: `target` is a valid fd, and the return value is checked.
+            if unsafe { libc::ftruncate(target.as_raw_fd(), 0) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+
+        if flags & libc::O_NONBLOCK == 0 {
+            // Safe: `file` is a valid fd, and the return values are checked.
+            let fl = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+            if fl < 0
+                || unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFL, fl & !libc::O_NONBLOCK) }
+                    < 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(file)
+    }
+
+    /// Open `path` with `flags`, and keep the fd only if it is the file `want` describes.
+    fn open_checked(path: &CStr, flags: libc::c_int, want: &libc::stat) -> io::Result<File> {
         // Safe: `path` is NUL-terminated, and the return value is checked.
         let new_fd = unsafe { libc::open(path.as_ptr(), flags) };
         if new_fd < 0 {
             return Err(io::Error::last_os_error());
         }
-        // Safe: we just opened this fd, and nothing else owns it.
+        // Safe: we just opened this fd, and nothing else owns it. Dropping it closes it.
         let file = unsafe { File::from_raw_fd(new_fd) };
         if !same_file(&fstat(new_fd)?, want) {
             return Err(not_same_file());

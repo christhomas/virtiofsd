@@ -1111,3 +1111,39 @@ fn a_hard_link_opens_its_own_file_after_another_is_renamed_over_the_first_name()
         "b must read its own file, not the one now named a"
     );
 }
+
+/// The reopen applies a guest's `O_TRUNC` only once it has checked the file, so
+/// it must still truncate, through the name the inode was first opened by and
+/// through its other link, and under `O_RDONLY` as open(2) does.
+#[test]
+fn an_open_with_o_trunc_truncates_the_file_it_opens() {
+    for (access, name) in [(libc::O_WRONLY as u32, "O_WRONLY"), (0, "O_RDONLY")] {
+        let (dir, fs) = setup();
+        let ctx = current_ctx();
+        fs::write(dir.path().join("a"), b"before").unwrap();
+        fs::write(dir.path().join("keep"), b"kept").unwrap();
+
+        let inode = lookup_inode(&fs, ROOT_ID, "a");
+        let (handle, _) = fs
+            .open(ctx, inode, false, access | LINUX_O_TRUNC)
+            .unwrap_or_else(|e| panic!("{name}|O_TRUNC open of a: {e}"));
+        fs.release(ctx, inode, 0, handle.unwrap(), false, false, None)
+            .ok();
+        assert_eq!(fs::read(dir.path().join("a")).unwrap(), b"", "{name}: a");
+
+        fs::write(dir.path().join("a"), b"before").unwrap();
+        link_a_as_b(&fs);
+        fs.unlink(ctx, ROOT_ID, cstr("a").as_c_str()).unwrap();
+        let (handle, _) = fs
+            .open(ctx, inode, false, access | LINUX_O_TRUNC)
+            .unwrap_or_else(|e| panic!("{name}|O_TRUNC open of b: {e}"));
+        fs.release(ctx, inode, 0, handle.unwrap(), false, false, None)
+            .ok();
+        assert_eq!(fs::read(dir.path().join("b")).unwrap(), b"", "{name}: b");
+        assert_eq!(
+            fs::read(dir.path().join("keep")).unwrap(),
+            b"kept",
+            "{name}: no other file is touched"
+        );
+    }
+}
