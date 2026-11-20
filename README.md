@@ -148,6 +148,15 @@ Log to syslog. Default: stderr.
 Print vhost-user.json backend program capabilities and exit.
 
 ```shell
+--port-version
+```
+Print the release this build was published as and exit, e.g. `1.14.0.1`. That is
+the upstream version `--version` prints, plus this port's packaging revision when
+it has shipped more than one build of that version. `--version` itself is
+unchanged. The value comes from the committed `PORT_VERSION` file. The flag must
+be given alone.
+
+```shell
 --allow-direct-io
 ```
 Honor the `O_DIRECT` flag passed down by guest applications. macOS has no

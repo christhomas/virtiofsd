@@ -67,7 +67,10 @@ jobs:
           #
           #    Consequence worth knowing: the binary reports CARGO_PKG_VERSION, so
           #    `virtiofsd --version` prints 1.14.0 for a v1.14.0.1 release. That is
-          #    accurate — the code IS upstream 1.14.0; only the packaging differs.
+          #    accurate — the code IS upstream 1.14.0; only the packaging differs —
+          #    and it stays so, because hypervisors and scripts parse it. The whole
+          #    release version is printed by `virtiofsd --port-version` instead
+          #    (check 2b).
           if ! printf '%s' "${RAW}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z.]+)?$'; then
             echo "::error::Tag '${RAW}' must be vMAJOR.MINOR.PATCH, optionally .REVISION, optionally -prerelease"
             exit 1
@@ -85,6 +88,17 @@ jobs:
             exit 1
           fi
           echo "OK: tag targets upstream ${UPSTREAM_PART}, matching Cargo.toml"
+
+          # 2b) The binary reports its release with --port-version, read from the
+          #     committed PORT_VERSION file (never from the tag, so a rebuild of the
+          #     same commit gives the same bytes). The tag must be exactly that value,
+          #     or the published binary would name another release.
+          PORT_VERSION="$(tr -d '[:space:]' < PORT_VERSION)"
+          if [ "${PORT_VERSION}" != "${VERSION}" ]; then
+            echo "::error::Tag '${VERSION}' does not match PORT_VERSION '${PORT_VERSION}'. Set PORT_VERSION to the release in the pull request before tagging." >&2
+            exit 1
+          fi
+          echo "OK: PORT_VERSION is ${PORT_VERSION}"
 
           # 3) Must be strictly newer than the latest published release. Map '-'
           #    to '~' so `sort -V` orders pre-releases before their release

@@ -263,6 +263,13 @@ struct Opt {
     #[arg(long = "print-capabilities")]
     print_capabilities: bool,
 
+    /// Print the release this build was published as and exit
+    ///
+    /// The release is the upstream version that --version prints, plus a packaging revision
+    /// when this port has shipped more than one build of it (e.g. 1.14.0.1).
+    #[arg(long = "port-version", exclusive = true)]
+    port_version: bool,
+
     /// Modify the list of capabilities, e.g., --modcaps=+sys_admin:-chown
     #[arg(long)]
     modcaps: Option<String>,
@@ -666,8 +673,18 @@ fn drop_capabilities(inode_file_handles: InodeFileHandlesMode, modcaps: Option<S
     }
 }
 
+/// The release this build is published as: Cargo.toml's version, plus this port's packaging
+/// revision when there is one. It is read from a committed file, not from the tag or the build
+/// environment, so a rebuild from the same commit produces the same binary.
+const PORT_VERSION: &str = include_str!("../PORT_VERSION");
+
 fn main() {
     let opt = parse_compat(Opt::parse());
+
+    if opt.port_version {
+        println!("{}", PORT_VERSION.trim());
+        return;
+    }
 
     // Enable killpriv_v2 only if user explicitly asked for it by using
     // --killpriv-v2 or -o killpriv_v2. Otherwise disable it by default.
