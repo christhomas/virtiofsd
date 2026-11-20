@@ -175,43 +175,162 @@ pub fn reopen_fd_through_proc(
     )
 }
 
-/// macOS: /proc/self/fd does not exist. Use fcntl(F_GETPATH) to get the path,
-/// then reopen it with the requested flags.
-// TODO(macos): This approach has a TOCTOU race: the path could change between
-// F_GETPATH and the subsequent open(). Also, F_GETPATH may fail for certain
-// fd types (e.g. pipes, sockets).
+/// macOS: /proc/self/fd does not exist, so the fd is reopened by path.
+///
+/// The path comes from `fcntl(F_GETPATH)`, which names the file by the name it
+/// was opened through. That name can stop leading to this file while the file
+/// still exists under another hard link: once it is unlinked, `F_GETPATH` fails
+/// with `ENOENT`, and once another file is renamed over it, `F_GETPATH` still
+/// returns it, so it opens the other file. So every path is checked to name the
+/// same `(st_dev, st_ino)` as `fd`, before it is opened (the flags may truncate)
+/// and again after. When the `F_GETPATH` path fails, the file is looked up by
+/// its identity instead, with `fsgetpath(2)`: the volume's fsid and the inode
+/// number give one of the file's current paths, whichever link it is.
+///
+/// What remains is the window between the check and the `open()` of the same
+/// path, which the check after the open closes for everything but `O_TRUNC`.
 #[cfg(target_os = "macos")]
 pub fn reopen_fd_through_proc(
     fd: &impl AsRawFd,
     flags: libc::c_int,
     _proc_self_fd: &File,
 ) -> io::Result<File> {
-    let mut buf = vec![0u8; libc::PATH_MAX as usize];
-    let ret = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) };
-    if ret == -1 {
-        let err = io::Error::last_os_error();
-        log::debug!(
-            "reopen_fd_through_proc: F_GETPATH failed for fd {}: {}",
-            fd.as_raw_fd(),
-            err
-        );
-        return Err(err);
-    }
-    let path = CStr::from_bytes_until_nul(&buf)
-        .map_err(|_| other_io_error("F_GETPATH returned invalid path"))?;
+    let raw_fd = fd.as_raw_fd();
+    let flags = flags & !libc::O_NOFOLLOW;
+    let st = macos_reopen::fstat(raw_fd)?;
+
+    let first_err = match macos_reopen::fd_path(raw_fd)
+        .and_then(|path| macos_reopen::open_same_file(&path, flags, &st))
+    {
+        Ok(file) => return Ok(file),
+        Err(err) => err,
+    };
     log::debug!(
-        "reopen_fd_through_proc: fd {} -> path {:?}, flags=0x{:x}",
-        fd.as_raw_fd(),
-        path,
-        flags & !libc::O_NOFOLLOW
+        "reopen_fd_through_proc: fd {raw_fd} by its F_GETPATH path: {first_err}; \
+         looking it up by inode {} instead",
+        st.st_ino
     );
-    let new_fd = unsafe { libc::open(path.as_ptr(), flags & !libc::O_NOFOLLOW) };
-    if new_fd < 0 {
-        let err = io::Error::last_os_error();
-        log::debug!("reopen_fd_through_proc: open failed: {}", err);
-        Err(err)
-    } else {
-        Ok(unsafe { File::from_raw_fd(new_fd) })
+
+    match macos_reopen::path_by_id(raw_fd, st.st_ino)
+        .and_then(|path| macos_reopen::open_same_file(&path, flags, &st))
+    {
+        Ok(file) => Ok(file),
+        Err(err) => {
+            log::debug!(
+                "reopen_fd_through_proc: fd {raw_fd} by inode {}: {err}",
+                st.st_ino
+            );
+            Err(first_err)
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos_reopen {
+    use super::other_io_error;
+    use std::ffi::{CStr, CString};
+    use std::fs::File;
+    use std::io;
+    use std::mem::MaybeUninit;
+    use std::os::unix::io::{FromRawFd, RawFd};
+
+    extern "C" {
+        // <sys/fsgetpath.h>, macOS 10.13 and later. Not bound by the libc crate.
+        fn fsgetpath(
+            buf: *mut libc::c_char,
+            bufsize: libc::size_t,
+            fsid: *mut libc::fsid_t,
+            objid: u64,
+        ) -> libc::ssize_t;
+    }
+
+    pub(super) fn fstat(fd: RawFd) -> io::Result<libc::stat> {
+        let mut st = MaybeUninit::<libc::stat>::zeroed();
+        // Safe: `st` is large enough for a `stat`, and the return value is checked.
+        if unsafe { libc::fstat(fd, st.as_mut_ptr()) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // Safe: fstat() succeeded, so it initialized `st`.
+        Ok(unsafe { st.assume_init() })
+    }
+
+    /// The path `fd` was opened by, from `F_GETPATH`.
+    pub(super) fn fd_path(fd: RawFd) -> io::Result<CString> {
+        let mut buf = vec![0u8; libc::PATH_MAX as usize];
+        // Safe: F_GETPATH writes at most PATH_MAX bytes into `buf`.
+        if unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        CStr::from_bytes_until_nul(&buf)
+            .map(CStr::to_owned)
+            .map_err(|_| other_io_error("F_GETPATH returned invalid path"))
+    }
+
+    /// A current path of inode `ino` on the volume holding `fd`, from `fsgetpath(2)`.
+    pub(super) fn path_by_id(fd: RawFd, ino: u64) -> io::Result<CString> {
+        let mut sfs = MaybeUninit::<libc::statfs>::zeroed();
+        // Safe: `sfs` is large enough for a `statfs`, and the return value is checked.
+        if unsafe { libc::fstatfs(fd, sfs.as_mut_ptr()) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // Safe: fstatfs() succeeded, so it initialized `sfs`.
+        let mut fsid = unsafe { sfs.assume_init() }.f_fsid;
+        let mut buf = vec![0u8; libc::PATH_MAX as usize];
+        // Safe: fsgetpath() writes at most `buf.len()` bytes into `buf`, and the return value is
+        // checked.
+        let len = unsafe {
+            fsgetpath(
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+                &mut fsid,
+                ino,
+            )
+        };
+        if len < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        CStr::from_bytes_until_nul(&buf)
+            .map(CStr::to_owned)
+            .map_err(|_| other_io_error("fsgetpath returned invalid path"))
+    }
+
+    fn same_file(a: &libc::stat, b: &libc::stat) -> bool {
+        a.st_dev == b.st_dev && a.st_ino == b.st_ino
+    }
+
+    fn not_same_file() -> io::Error {
+        io::Error::from_raw_os_error(libc::ENOENT)
+    }
+
+    /// Open `path` with `flags` only if it names the file `want` describes, checking before the
+    /// open, since `flags` may truncate, and after it, in case the name changed in between.
+    pub(super) fn open_same_file(
+        path: &CStr,
+        flags: libc::c_int,
+        want: &libc::stat,
+    ) -> io::Result<File> {
+        let mut st = MaybeUninit::<libc::stat>::zeroed();
+        // Safe: `path` is NUL-terminated, `st` is large enough for a `stat`, and the return value
+        // is checked.
+        if unsafe { libc::lstat(path.as_ptr(), st.as_mut_ptr()) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // Safe: lstat() succeeded, so it initialized `st`.
+        if !same_file(&unsafe { st.assume_init() }, want) {
+            return Err(not_same_file());
+        }
+
+        // Safe: `path` is NUL-terminated, and the return value is checked.
+        let new_fd = unsafe { libc::open(path.as_ptr(), flags) };
+        if new_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // Safe: we just opened this fd, and nothing else owns it.
+        let file = unsafe { File::from_raw_fd(new_fd) };
+        if !same_file(&fstat(new_fd)?, want) {
+            return Err(not_same_file());
+        }
+        Ok(file)
     }
 }
 
